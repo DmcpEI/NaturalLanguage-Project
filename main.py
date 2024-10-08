@@ -71,10 +71,14 @@ class DataPreProcessing:
         self.data_loader = data_loader
         self.stop_words = set(stopwords.words('english'))
 
+        # Sanity check
         self._sanity_check()
 
         # Apply text cleaning
         self._clean_text()
+
+        # Save the preprocessed data to CSV
+        self.save_to_csv('data/movie_data_preprocessed.csv')
 
     def _sanity_check(self):
         try:
@@ -87,32 +91,23 @@ class DataPreProcessing:
             return False
 
     def _clean_text(self):
-
         # Lowercase the text
-        self.data_loader.data['clean_plot'] = self.data_loader.data['plot'].str.lower()
-
-        # Check if there are any NaN values in the 'clean_plot' column
-        #nan_count = self.data_loader.data['clean_plot'].isna().sum()
-        #print(f"Number of NaN values in 'clean_plot': {nan_count}")
+        self.data_loader.data['plot'] = self.data_loader.data['plot'].str.lower()
 
         # Remove punctuation
-        #self.data_loader.data['clean_plot'] = self.data_loader.data['clean_plot'].apply(lambda x: re.sub(r'[^\w\s]', '', x))
+        self.data_loader.data['plot'] = self.data_loader.data['plot'].apply(lambda x: re.sub(r'[^\w\s]', '', x))
 
         # Remove stopwords
-        #self.data_loader.data['clean_plot'] = self.data_loader.data['clean_plot'].apply(
-        #    lambda x: ' '.join([word for word in x.split() if word not in self.stop_words]))
+        self.data_loader.data['plot'] = self.data_loader.data['plot'].apply(
+            lambda x: ' '.join([word for word in x.split() if word not in self.stop_words])
+        )
 
-        # Debug: Check the number of rows after cleaning
-        print(f"Number of rows after cleaning: {self.data_loader.data.shape[0]}")
-
-    # Method to save data to CSV
     def save_to_csv(self, output_path):
         try:
             self.data_loader.data.to_csv(output_path, index=False)
             print(f"Data successfully saved to {output_path}")
         except Exception as e:
             print(f"Error saving CSV: {e}")
-
 
 
 def synonym_replacement(text, num_replacements):
@@ -144,18 +139,16 @@ def synonym_replacement(text, num_replacements):
 filename = 'data/train.txt'
 column_names = ['title', 'language', 'genre', 'director', 'plot']
 
-# Load and preprocess the data
+# Load the data
 data_loader = DataManipulator(filename, column_names ,'genre')
+
+# Preprocess the data
 data_preprocessing = DataPreProcessing(data_loader)
 
-print(data_loader.data.shape)
-
-data_preprocessing.save_to_csv('data/movie_data_preprocessed.csv')
-
 # # Data Cleaning
-#
+
 # # Data Visualization
-#
+
 # Divide the data into features and target variable
 X = data_loader.data.drop(columns=[data_loader.target])
 y = data_loader.data[data_loader.target]
@@ -169,21 +162,21 @@ print(f"Original dataset size: {original_size}")
 
 augmented_texts = []
 
-for text in X_train:
-    augmented_texts.extend(synonym_replacement(text, num_replacements=1))  # Generate multiple samples per text
-
-# Create a DataFrame for the augmented texts
-df_augmented = pd.DataFrame({'text': augmented_texts})
-
-# Combine original and augmented data
-df_combined = pd.concat([X_train.reset_index(drop=True), df_augmented.reset_index(drop=True)], ignore_index=True)
-
-# Remove duplicates
-#df_combined = df_combined.drop_duplicates().reset_index(drop=True)
-
-# Display sizes
-new_size = len(df_combined)
-print(f"New dataset size after augmentation: {new_size}")
+# for text in X_train:
+#     augmented_texts.extend(synonym_replacement(text, num_replacements=1))  # Generate multiple samples per text
+#
+# # Create a DataFrame for the augmented texts
+# df_augmented = pd.DataFrame({'text': augmented_texts})
+#
+# # Combine original and augmented data
+# df_combined = pd.concat([X_train.reset_index(drop=True), df_augmented.reset_index(drop=True)], ignore_index=True)
+#
+# # Remove duplicates
+# #df_combined = df_combined.drop_duplicates().reset_index(drop=True)
+#
+# # Display sizes
+# new_size = len(df_combined)
+# print(f"New dataset size after augmentation: {new_size}")
 
 # Split the training data into training and validation sets
 X_train, X_validation, y_train, y_validation = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
