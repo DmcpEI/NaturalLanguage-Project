@@ -1,13 +1,18 @@
 import pandas as pd
 import re
 import nltk
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 import random
 from docutils.parsers.rst.directives.misc import Class
+from wordcloud import WordCloud
 from nltk import word_tokenize
 from nltk.corpus import stopwords
 from nltk.corpus import wordnet
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
+from textblob import TextBlob
 
 # Download necessary resources for NLTK
 nltk.download('stopwords')
@@ -77,9 +82,6 @@ class DataPreProcessing:
         # Apply text cleaning
         self._clean_text()
 
-        # Save the preprocessed data to CSV
-        self.save_to_csv('data/movie_data_preprocessed.csv')
-
     def _sanity_check(self):
         try:
             if not self.data_loader:
@@ -102,13 +104,109 @@ class DataPreProcessing:
             lambda x: ' '.join([word for word in x.split() if word not in self.stop_words])
         )
 
-    def save_to_csv(self, output_path):
-        try:
-            self.data_loader.data.to_csv(output_path, index=False)
-            print(f"Data successfully saved to {output_path}")
-        except Exception as e:
-            print(f"Error saving CSV: {e}")
+class DataVisualization:
 
+    def __init__(self, data_loader, valid_plot_types):
+
+        self.data_loader = data_loader
+        self.valid_plot_types = valid_plot_types
+        self.labels = self.data_loader.data[self.data_loader.target].unique().tolist()
+
+    def plots(self, plot_types):
+
+        for plot_type in plot_types:
+            # Check if the selected plots are in the list of available plots
+            if plot_type not in self.valid_plot_types:
+                print(
+                    f"Ignoring invalid plot type: {plot_type}. Supported plot types: {', '.join(self.valid_plot_types)}")
+                continue
+
+            for feature in self.data_loader.data.columns:
+
+                if plot_type == 'bar':
+                    if feature == 'language':
+                        # Plot the distribution of languages
+                        self.data_loader.data[feature].value_counts().plot(kind='bar', figsize=(10, 6))
+                        plt.title('Distribution of Languages')
+                        plt.xlabel('Language')
+                        plt.ylabel('Number of Movies')
+                        plt.xticks(rotation=45)
+                        plt.show()
+                    if feature == 'director':
+                        # Plot the top 10 directors by number of movies
+                        self.data_loader.data[feature].value_counts().nlargest(10).plot(kind='bar', figsize=(10, 9))
+                        plt.title('Top 10 Directors by Number of Movies')
+                        plt.xlabel('Director')
+                        plt.ylabel('Number of Movies')
+                        plt.xticks(rotation=45)
+                        plt.show()
+                    if feature == 'genre':
+                        # Create a crosstab of directors and genres (counts of movies per genre per director)
+                        director_genre_crosstab = pd.crosstab(self.data_loader.data['director'], self.data_loader.data['genre'])
+                        # Sum the number of movies per director (across all genres)
+                        director_movie_counts = director_genre_crosstab.sum(axis=1)
+                        # Get the top 10 directors with the most movies
+                        top_10_directors = director_movie_counts.nlargest(10)
+                        # Filter the original crosstab to show only the top 10 directors
+                        top_directors_crosstab = director_genre_crosstab.loc[top_10_directors.index]
+                        # Plot a stacked bar plot for the top 10 directors by genre
+                        top_directors_crosstab.plot(kind='bar', stacked=True, figsize=(10, 9))
+                        plt.title('Top 10 Directors by Genre')
+                        plt.xlabel('Director')
+                        plt.ylabel('Number of Movies')
+                        plt.xticks(rotation=45)
+                        plt.show()
+
+                if plot_type == 'hist' and feature == 'plot':
+                    # Calculate the length of each plot
+                    self.data_loader.data['plot_length'] = self.data_loader.data['plot'].apply(lambda x: len(str(x).split()))
+                    # Plot the histogram
+                    self.data_loader.data['plot_length'].plot(kind='hist', bins=50, figsize=(10, 6))
+                    plt.title('Distribution of Movie Plot Lengths')
+                    plt.xlabel('Number of Words in Plot')
+                    plt.ylabel('Frequency')
+                    plt.show()
+
+                if plot_type == 'pie' and feature == 'genre':
+                    # Plot the distribution of genres
+                    self.data_loader.data[feature].value_counts().plot(kind='pie', figsize=(10, 6))
+                    plt.title(f'Distribution of Genres')
+                    plt.show()
+
+                if plot_type == 'wordcloud' and feature == 'plot':
+                    # Combine all the plots into a single string
+                    plot_text = ' '.join(self.data_loader.data['plot'].dropna())
+                    # Create the word cloud
+                    wordcloud = WordCloud(width=800, height=400, background_color='white').generate(plot_text)
+                    # Display the word cloud
+                    plt.figure(figsize=(10, 6))
+                    plt.imshow(wordcloud, interpolation='bilinear')
+                    plt.axis('off')
+                    plt.show()
+
+class FeatureCreation:
+
+    def __init__(self, data_loader):
+
+        self.data_loader = data_loader
+
+    def create_text_based_features(self):
+
+        # Create Plot Length Feature
+        self.data_loader.data['plot_length'] = self.data_loader.data['plot'].apply(lambda x: len(str(x).split()))
+        print("Created plot_length feature\n")
+        # Create Average Word Length Feature
+        self.data_loader.data['avg_word_length'] = self.data_loader.data['plot'].apply(
+            lambda x: np.mean([len(word) for word in str(x).split()]))
+        print("Created avg_word_length feature\n")
+        # Create Unique Word Count Feature
+        self.data_loader.data['unique_word_count'] = self.data_loader.data['plot'].apply(
+            lambda x: len(set(str(x).split())))
+        print("Created unique_word_count feature\n")
+        # Create Sentiment Polarity Feature
+        self.data_loader.data['sentiment_polarity'] = self.data_loader.data['plot'].apply(
+            lambda x: TextBlob(str(x)).sentiment.polarity)
+        print("Created sentiment_polarity feature\n")
 
 def synonym_replacement(text, num_replacements):
     words = word_tokenize(text)
@@ -145,9 +243,27 @@ data_loader = DataManipulator(filename, column_names ,'genre')
 # Preprocess the data
 data_preprocessing = DataPreProcessing(data_loader)
 
-# # Data Cleaning
+data_loader.data.to_csv('data/movie_data_preprocessed.csv', index=False)
 
-# # Data Visualization
+# Visualize the data
+data_visualization = DataVisualization(data_loader, ['pie', 'bar', 'hist', 'wordcloud'])
+data_visualization.plots(['pie', 'bar', 'hist', 'wordcloud'])
+
+# %% 2- Feature Creation
+
+# Initialize the FeatureCreation class with the data
+feature_creator = FeatureCreation(data_loader)
+
+print("\nFeatures Created:\n")
+
+# Create text-based features
+feature_creator.create_text_based_features()
+
+data_loader.data.to_csv('data/movie_data_featurecreation.csv', index=False)
+
+# Data Visualization of the new features
+
+# %% 3- Data Splits
 
 # Divide the data into features and target variable
 X = data_loader.data.drop(columns=[data_loader.target])
