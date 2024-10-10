@@ -13,11 +13,13 @@ from nltk.corpus import wordnet
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
 from textblob import TextBlob
+from deep_translator import GoogleTranslator
 
 # Download necessary resources for NLTK
 nltk.download('stopwords')
 nltk.download('wordnet')
 nltk.download('punkt')
+nltk.download('punkt_tab')
 
 class DataLoader:
 
@@ -208,29 +210,64 @@ class FeatureCreation:
             lambda x: TextBlob(str(x)).sentiment.polarity)
         print("Created sentiment_polarity feature\n")
 
-def synonym_replacement(text, num_replacements):
+def get_synonyms(word):
+    synonyms = []
+    for syn in wordnet.synsets(word):
+        for lemma in syn.lemmas():
+            synonyms.append(lemma.name())
+    return set(synonyms)
+
+
+def synonym_replacement(text, n_replacements):
     words = word_tokenize(text)
-    new_samples = []
+    new_words = words.copy()
 
-    for _ in range(1000):  # Generate 10 different variations
-        new_words = words.copy()
-        random_indices = random.sample(range(len(words)), min(num_replacements, len(words)))  # Select random indices to replace
-        for idx in random_indices:
-            synonyms = wordnet.synsets(words[idx])
-            if synonyms:  # If the word has synonyms
-                synonym = random.choice(synonyms).lemmas()[0].name()  # Pick a random synonym
-                new_words[idx] = synonym.replace('_', ' ')  # Replace with the synonym
-        new_samples.append(' '.join(new_words))  # Add the new variation
+    # List of indices where replacements will happen
+    indices_to_replace = random.sample(range(len(words)), min(n_replacements, len(words)))
+    successful_replacements = 0
+    replacements_log = []
 
-    return new_samples
+    for idx in indices_to_replace:
+        word = words[idx]
+        synonyms = get_synonyms(word)
+        if synonyms:
+            # Replace the word with a random synonym if available
+            synonym = random.choice(list(synonyms))
+
+            new_words[idx] = synonym
+            successful_replacements += 1
+            replacements_log.append((word, synonym))
+    new_plot = ' '.join(new_words)
+    # print(f"Original plot: {text}...\nNew plot: {new_plot}...\n")
+    # print(f"Replaced {successful_replacements} words in the plot.")
+    # for original, new in replacements_log:
+    #     print(f"Replaced '{original}' with '{new}'")
+    return new_plot
 
 
-# Example usage
-# original_sentence = "The quick brown fox jumps over the lazy dog."
-# augmented_sentence = synonym_replacement(original_sentence, n=2)
-# print("Original:", original_sentence)
-# print("Augmented:", augmented_sentence)
+def augment_data(X_train, n_augmentations):
+    new_rows = []
 
+    # Iterate over each row in the dataset
+    for _, row in X_train.iterrows():
+        original_row = row.to_dict()  # Convert the row to a dictionary
+
+        # Generate n_augmentations new rows with modified plots
+        for _ in range(n_augmentations):
+            new_row = original_row.copy()  # Keep other columns the same
+            new_row['plot'] = synonym_replacement(row['plot'], n_replacements=50)
+            new_rows.append(new_row)
+
+    # Create a DataFrame from the new rows and append to X_train
+    augmented_df = pd.DataFrame(new_rows)
+    return pd.concat([X_train, augmented_df], ignore_index=True)
+
+def back_translate(text, src_lang='en', mid_lang='es'):
+    # Translate text to the intermediate language (e.g., Spanish)
+    translated = GoogleTranslator(source=src_lang, target=mid_lang).translate(text)
+    # Translate it back to the original language
+    back_translated = GoogleTranslator(source=mid_lang, target=src_lang).translate(translated)
+    return back_translated
 
 # %% 1- Pre Processing and EDA
 
@@ -238,7 +275,7 @@ filename = 'data/train.txt'
 column_names = ['title', 'language', 'genre', 'director', 'plot']
 
 # Load the data
-data_loader = DataManipulator(filename, column_names ,'genre')
+data_loader = DataManipulator(filename, column_names,'genre')
 
 # Preprocess the data
 data_preprocessing = DataPreProcessing(data_loader)
@@ -273,26 +310,18 @@ y = data_loader.data[data_loader.target]
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
 # Oversample
+X_train_augmented = augment_data(X_train, n_augmentations=1)
 original_size = len(X_train)
 print(f"Original dataset size: {original_size}")
+print(f"Augmented dataset size: {len(X_train_augmented)}")
+#save the augmented data
+# feature_creator_augmented = FeatureCreation(X_train_augmented)
+# feature_creator_augmented.create_text_based_features()
+# text = "A thrilling adventure of a young boy in the mysterious woods."
+# back_translated_text = back_translate(text)
+# print(back_translated_text)
+#X_train_augmented.to_csv('data/movie_data_augmented.csv', index=False)
 
-augmented_texts = []
-
-# for text in X_train:
-#     augmented_texts.extend(synonym_replacement(text, num_replacements=1))  # Generate multiple samples per text
-#
-# # Create a DataFrame for the augmented texts
-# df_augmented = pd.DataFrame({'text': augmented_texts})
-#
-# # Combine original and augmented data
-# df_combined = pd.concat([X_train.reset_index(drop=True), df_augmented.reset_index(drop=True)], ignore_index=True)
-#
-# # Remove duplicates
-# #df_combined = df_combined.drop_duplicates().reset_index(drop=True)
-#
-# # Display sizes
-# new_size = len(df_combined)
-# print(f"New dataset size after augmentation: {new_size}")
 
 # Split the training data into training and validation sets
 X_train, X_validation, y_train, y_validation = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
