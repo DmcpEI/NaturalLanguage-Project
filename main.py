@@ -23,12 +23,15 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import accuracy_score, recall_score, confusion_matrix
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.decomposition import PCA
+from sklearn.base import clone
 from textblob import TextBlob
 
 # Download necessary resources for NLTK
 nltk.download('stopwords')
 nltk.download('wordnet')
 nltk.download('punkt')
+nltk.download('punkt_tab')
+from nltk.corpus import wordnet
 
 class DataLoader:
 
@@ -83,10 +86,10 @@ class DataManipulator(DataLoader):
 
 class DataPreProcessing:
 
-    def __init__(self, data_loader, glove_file_path, reduce_dims=True, num_components=75):
+    def __init__(self, data_loader, glove_file_path, reduce_dims=True, num_components=50):
         self.data_loader = data_loader
         self.stop_words = set(stopwords.words('english'))
-        self.embeddings_index = self.load_glove_embeddings(glove_file_path)
+        self.embeddings_index = self._load_glove_embeddings(glove_file_path)
         self.reduce_dims = reduce_dims
         self.num_components = num_components
 
@@ -118,7 +121,7 @@ class DataPreProcessing:
             lambda x: ' '.join([word for word in x.split() if word not in self.stop_words])
         )
 
-    def load_glove_embeddings(self, file_path):
+    def _load_glove_embeddings(self, file_path):
         """Load GloVe pre-trained embeddings into a dictionary."""
         embeddings_index = {}
         with open(file_path, encoding='utf-8') as f:
@@ -130,7 +133,7 @@ class DataPreProcessing:
         print(f"Loaded {len(embeddings_index)} word vectors from GloVe.")
         return embeddings_index
 
-    def plot_to_embedding(self, text):
+    def _plot_to_embedding(self, text):
         """Convert a plot of text into a dense vector representation using GloVe."""
         words = text.split()
         embedding_dim = 100  # Adjust based on the GloVe vector size
@@ -146,48 +149,91 @@ class DataPreProcessing:
         if word_count > 0:
             plot_vector /= word_count
 
+        if word_count == 0:
+            print(f"No valid words found for text: {text}")  # Debugging statement
+            return np.nan  # or return a zero vector
+
         return plot_vector
 
-    def embeddings(self):
-        """Create dense vector representations for each plot and return X and y."""
-        # Create plot embeddings
-        self.data_loader.data['plot_embedding'] = self.data_loader.data['plot'].apply(self.plot_to_embedding)
+    def embeddings(self, X_train_augmented, y_train_augmented, X_test_raw, y_test_raw):
+        """Create dense vector representations for both train and test data and return encoded X and y."""
+
+        # ----- Processing X_train_augmented -----
+
+        # Create plot embeddings for X_train_augmented
+        X_train_augmented['plot_embedding'] = X_train_augmented['plot'].apply(self._plot_to_embedding)
 
         # Stack the plot embeddings into a matrix
-        plot_embeddings = np.vstack(self.data_loader.data['plot_embedding'].values)
+        plot_embeddings_train = np.vstack(X_train_augmented['plot_embedding'].values)
 
-        # Optional: Apply PCA to reduce the dimensions of embeddings if reduce_dims is True
+        # Apply PCA to reduce dimensionality
         if self.reduce_dims:
             pca = PCA(n_components=self.num_components)
-            plot_embeddings = pca.fit_transform(plot_embeddings)
-            print(f"Reduced plot embeddings to {self.num_components} dimensions using PCA.")
+            plot_embeddings_train = pca.fit_transform(plot_embeddings_train)
+            print(f"Reduced training plot embeddings to {self.num_components} dimensions using PCA.")
 
-        # Convert to a DataFrame and use as a single column
-        plot_embeddings_df = pd.DataFrame(plot_embeddings,
-                                          columns=[f'embedding_{i}' for i in range(plot_embeddings.shape[1])])
+        # Convert plot embeddings into a DataFrame
+        plot_embeddings_train_df = pd.DataFrame(plot_embeddings_train,
+                                                columns=[f'embedding_{i}' for i in
+                                                         range(plot_embeddings_train.shape[1])])
 
-        # Drop unnecessary columns and concatenate the reduced GloVe vectors
-        X = pd.concat([self.data_loader.data.drop(columns=['plot', 'title', 'plot_embedding', 'genre']),
-                       plot_embeddings_df], axis=1)
+        # Drop unnecessary columns and concatenate the plot embeddings
+        X_train_processed = pd.concat([X_train_augmented.drop(columns=['plot', 'title', 'plot_embedding']),
+                                       plot_embeddings_train_df], axis=1)
 
-        # Instead of one-hot encoding, use Label Encoding for categorical variables to reduce dimensions
+        # Label encode categorical features in X_train_augmented
         for col in ['language', 'director']:
             le = LabelEncoder()
-            X[col] = le.fit_transform(X[col].astype(str))
+            X_train_processed[col] = le.fit_transform(X_train_processed[col].astype(str))
 
-        # Convert column names to strings
-        X.columns = X.columns.astype(str)
+        # ----- Processing X_test_raw -----
 
-        # Encode the target variable
+        # Create plot embeddings for X_test_raw
+        X_test_raw['plot_embedding'] = X_test_raw['plot'].apply(self._plot_to_embedding)
+
+        # Stack the plot embeddings into a matrix
+        plot_embeddings_test = np.vstack(X_test_raw['plot_embedding'].values)
+
+        # Apply PCA to reduce dimensionality
+        if self.reduce_dims:
+            plot_embeddings_test = pca.transform(plot_embeddings_test)  # Use the same PCA model from training
+            print(f"Reduced test plot embeddings to {self.num_components} dimensions using PCA.")
+
+        # Convert plot embeddings into a DataFrame
+        plot_embeddings_test_df = pd.DataFrame(plot_embeddings_test,
+                                               columns=[f'embedding_{i}' for i in range(plot_embeddings_test.shape[1])])
+
+        # Reset the index of the test DataFrame to avoid any alignment issues
+        X_test_raw.reset_index(drop=True, inplace=True)
+        plot_embeddings_test_df.reset_index(drop=True, inplace=True)
+
+        # Drop unnecessary columns and concatenate the plot embeddings
+        X_test_processed = pd.concat([X_test_raw.drop(columns=['plot', 'title', 'plot_embedding']),
+                                      plot_embeddings_test_df], axis=1)
+
+        # Label encode categorical features in X_test_raw
+        for col in ['language', 'director']:
+            le = LabelEncoder()
+            X_test_processed[col] = le.fit_transform(X_test_processed[col].astype(str))
+
+        # Check for NaN values in processed test features
+        for column in X_test_processed.columns:
+            nan_count = X_test_processed[column].isnull().sum()
+            if nan_count > 0:
+                print(f"NaN values found in test column '{column}': {nan_count}")
+
+        # ----- Encoding target variables -----
         label_encoder = LabelEncoder()
-        y = label_encoder.fit_transform(self.data_loader.data['genre'])  # Encode genres
+        y_train_encoded = label_encoder.fit_transform(y_train_augmented)
+        y_test_encoded = label_encoder.fit_transform(y_test_raw)
 
-        # Standardize the feature matrix for better performance with SVM and other models
+        # ----- Standardizing feature matrices -----
         scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
+        X_train_scaled = scaler.fit_transform(X_train_processed)
+        X_test_scaled = scaler.transform(X_test_processed)
 
-        print("Dense embeddings created, reduced (if enabled), and concatenated with other features.")
-        return X_scaled, y
+        print("Dense embeddings created, reduced, and concatenated with other features for both training and test sets.")
+        return X_train_scaled, y_train_encoded, X_test_scaled, y_test_encoded
 
 class DataVisualization:
 
@@ -271,89 +317,95 @@ class DataVisualization:
 
 class FeatureCreation:
 
-    def __init__(self, data_loader):
+    def __init__(self):
+        pass
 
-        self.data_loader = data_loader
-
-    def create_text_based_features(self):
+    def create_text_based_features(self, data):
 
         # Create Plot Length Feature
-        self.data_loader.data['plot_length'] = self.data_loader.data['plot'].apply(lambda x: len(str(x).split()))
+        data['plot_length'] = data['plot'].apply(lambda x: len(str(x).split()))
         print("Created plot_length feature\n")
         # Create Average Word Length Feature
-        self.data_loader.data['avg_word_length'] = self.data_loader.data['plot'].apply(
+        data['avg_word_length'] = data['plot'].apply(
             lambda x: np.mean([len(word) for word in str(x).split()]))
         print("Created avg_word_length feature\n")
         # Create Unique Word Count Feature
-        self.data_loader.data['unique_word_count'] = self.data_loader.data['plot'].apply(
+        data['unique_word_count'] = data['plot'].apply(
             lambda x: len(set(str(x).split())))
         print("Created unique_word_count feature\n")
         # Create Sentiment Polarity Feature
-        self.data_loader.data['sentiment_polarity'] = self.data_loader.data['plot'].apply(
+        data['sentiment_polarity'] = data['plot'].apply(
             lambda x: TextBlob(str(x)).sentiment.polarity)
         print("Created sentiment_polarity feature\n")
 
-class GloveEmbeddings:
+class DataAugmentation:
 
-    def __init__(self, data_loader, glove_file_path):
+    def __init__(self):
+        pass
 
-        self.data_loader = data_loader
-        self.embeddings_index = self.load_glove_embeddings(glove_file_path)
+    def get_synonyms(self, word):
+        synonyms = []
+        for syn in wordnet.synsets(word):
+            for lemma in syn.lemmas():
+                synonyms.append(lemma.name())
+        return set(synonyms)
 
-    def load_glove_embeddings(self, file_path):
-        """
-        Load GloVe pre-trained embeddings into a dictionary.
-        """
-        embeddings_index = {}
-        with open(file_path, encoding='utf-8') as f:
-            for line in f:
-                values = line.split()
-                word = values[0]
-                coefs = np.asarray(values[1:], dtype='float32')
-                embeddings_index[word] = coefs
-        print(f"Loaded {len(embeddings_index)} word vectors from GloVe.")
-        return embeddings_index
+    def synonym_replacement(self, text, n_replacements):
+        words = word_tokenize(text)
+        new_words = words.copy()
 
-    def plot_to_embedding(self, text):
-        """
-        Convert a plot of text into a dense vector representation using GloVe.
-        """
-        # Split the plot into words
-        words = text.split()
+        # List of indices where replacements will happen
+        indices_to_replace = random.sample(range(len(words)), min(n_replacements, len(words)))
+        successful_replacements = 0
+        replacements_log = []
 
-        # Initialize a vector to accumulate word vectors
-        embedding_dim = 100  # Adjust based on the GloVe vector size you are using
-        plot_vector = np.zeros((embedding_dim,))
-        word_count = 0
+        for idx in indices_to_replace:
+            word = words[idx]
+            synonyms = self.get_synonyms(word)
+            if synonyms:
+                # Replace the word with a random synonym if available
+                synonym = random.choice(list(synonyms))
+                new_words[idx] = synonym
+                successful_replacements += 1
+                replacements_log.append((word, synonym))
 
-        for word in words:
-            word_vector = self.embeddings_index.get(word.lower())
-            if word_vector is not None:
-                plot_vector += word_vector
-                word_count += 1
+        new_plot = ' '.join(new_words)
+        return new_plot
 
-        # If the plot contains valid words with vectors, return the average vector
-        if word_count > 0:
-            plot_vector /= word_count
+    def augment_data(self, data, n_augmentations):
+        original_row_count = len(data)
+        new_rows = []
 
-        return plot_vector
+        # Iterate over each row in the dataset
+        for _, row in data.iterrows():
+            original_row = row.to_dict()  # Convert the row to a dictionary
 
-    def create_dense_vectors(self):
-        """
-        Create dense vector representations for each plot.
-        """
-        # Apply the plot_to_embedding function to every plot in the dataset
-        self.data_loader.data['plot_embedding'] = self.data_loader.data['plot'].apply(self.plot_to_embedding)
+            # Generate n_augmentations new rows with modified plots
+            for _ in range(n_augmentations):
+                new_row = original_row.copy()  # Keep other columns the same
+                new_row['plot'] = self.synonym_replacement(row['plot'], n_replacements=50)
+                new_rows.append(new_row)
 
-        # Convert the plot embedding column to separate columns for each embedding dimension
-        plot_embeddings = np.vstack(self.data_loader.data['plot_embedding'].values)
-        plot_embeddings_df = pd.DataFrame(plot_embeddings,
-                                          columns=[f'embedding_{i}' for i in range(plot_embeddings.shape[1])])
+        # Create a DataFrame from the new rows and append to the original data
+        augmented_df = pd.DataFrame(new_rows)
+        augmented_data = pd.concat([data, augmented_df], ignore_index=True)
 
-        # Concatenate the dense embeddings with the original data
-        self.data_loader.data = pd.concat([self.data_loader.data, plot_embeddings_df], axis=1)
+        # Insights into the augmentation process
+        augmented_row_count = len(augmented_df)
+        total_row_count = len(augmented_data)
+        print(f"Original rows: {original_row_count}")
+        print(f"Augmented rows: {augmented_row_count}")
+        print(f"Total rows after augmentation: {total_row_count}")
 
-        print("Created dense vector representations for each plot using GloVe.")
+        # Check for NaN values in the augmented data
+        nan_values = augmented_data.isnull().sum()
+        nan_columns = nan_values[nan_values > 0]  # Filter columns with NaN values
+        if nan_columns.empty:
+            print("No NaN values found in the augmented data.")
+        else:
+            print(f"NaN values found in the following columns:\n{nan_columns}")
+
+        return augmented_data
 
 class ModelOptimization:
 
@@ -629,6 +681,79 @@ class ModelBuilding:
         print("Saving model as", filename)
         joblib.dump(model, full_path)
 
+class BaggingClassifier:
+
+    def __init__(self, base_model, X_train, y_train, X_test, y_test, n_straps=100, k_fold=5):
+
+        self.base_model = base_model
+        self.n_straps = n_straps
+        self.k_fold = k_fold
+        self.models = []
+        self.X_train, self.y_train = X_train, y_train
+        self.X_test = X_test
+        self.y_test = y_test
+        self.accuracy_scores = []
+        self.sensitivity_scores = []
+        self.specificity_scores = []
+        self.avg_accuracy = None
+        self.avg_sensitivity = None
+        self.avg_specificity = None
+
+    def examine_bagging(self):
+
+        kfold = KFold(n_splits=self.k_fold, shuffle=True)
+        for train_index, val_index in kfold.split(self.X_train):
+            # Generate n_straps samples and train the models for the current fold
+            self.models = []
+            for _ in range(self.n_straps):
+                # Create bootstrap sample with the available indices of the fold
+                bootstrap_indices = np.random.choice(train_index, size=len(self.X_train[train_index]), replace=True)
+                X_bootstrap = self.X_train[bootstrap_indices]
+                y_bootstrap = self.y_train[bootstrap_indices]
+
+                # Train base model on bootstrap sample
+                model = clone(self.base_model)
+                model.fit(X_bootstrap, y_bootstrap)
+                self.models.append(model)
+
+            y_pred = self.predict(self.X_train[val_index])
+
+            self.cm = ConfusionMatrix(actual_vector=list(self.y_train[val_index]), predict_vector=list(y_pred))
+            self.accuracy_scores.append(accuracy_score(self.y_train[val_index], y_pred))
+            print(self.cm)
+            self.sensitivity_scores.append(float(self.cm.TPR_Macro))
+            self.specificity_scores.append(float(self.cm.TNR_Macro))
+
+        self.avg_accuracy = sum(self.accuracy_scores) / len(self.accuracy_scores)
+        self.avg_sensitivity = sum(self.sensitivity_scores) / len(self.sensitivity_scores)
+        self.avg_specificity = sum(self.specificity_scores) / len(self.specificity_scores)
+
+        return self.avg_accuracy, self.avg_sensitivity, self.avg_specificity
+
+    def predict(self, X):
+
+        # Aggregate predictions from all models
+        predictions = np.zeros((len(X), self.n_straps))
+        for i, model in enumerate(self.models):
+            predictions[:, i] = model.predict(X)
+
+        # Use majority voting to determine final prediction
+        final_predictions = np.apply_along_axis(lambda x: np.bincount(x.astype(int)).argmax(), axis=1, arr=predictions)
+        return final_predictions
+
+    def evaluate(self, results_dict):
+
+        self.y_pred = self.predict(self.X_test)
+        self.cm = ConfusionMatrix(actual_vector=list(self.y_test), predict_vector=list(self.y_pred))
+        self.accuracy_scores = accuracy_score(self.y_test, self.y_pred)
+        self.sensitivity_scores = float(self.cm.TPR_Macro)
+        self.specificity_scores = float(self.cm.TNR_Macro)
+
+        results_dict['Bagging']['Accuracy'] = float(self.accuracy_scores)
+        results_dict['Bagging']['Sensitivity'] = float(self.sensitivity_scores)
+        results_dict['Bagging']['Specificity'] = float(self.specificity_scores)
+
+        print(f"Accuracy: {self.accuracy_scores}, Sensitivity: {self.sensitivity_scores}, Specificity: {self.specificity_scores}")
 
 # %% 1- Pre Processing and EDA
 
@@ -648,24 +773,30 @@ data_loader.data.to_csv('data/movie_data_preprocessed.csv', index=False)
 #data_visualization = DataVisualization(data_loader, ['pie', 'bar', 'hist', 'wordcloud'])
 #data_visualization.plots(['pie', 'bar', 'hist', 'wordcloud'])
 
-# %% 2- Feature Creation
+# %% 2- Data Augmentation and Data Splitting
+
+X_raw = data_loader.data.drop(columns=[data_loader.target])
+y_raw = data_loader.data[data_loader.target]
+
+X_train_raw, X_test_raw, y_train_raw, y_test_raw = train_test_split(X_raw, y_raw, test_size=0.2, random_state=42)
+
+data_augmentation = DataAugmentation()
+X_train_augmented = data_augmentation.augment_data(X_train_raw, n_augmentations=1)
+y_train_augmented = pd.concat([y_train_raw] * (X_train_augmented.shape[0] // X_train_raw.shape[0]), ignore_index=True)
+
+# %% 3- Feature Creation
 
 # Initialize the FeatureCreation class with the data
-feature_creator = FeatureCreation(data_loader)
+feature_creator = FeatureCreation()
 
 print("\nFeatures Created:\n")
-
 # Create text-based features
-feature_creator.create_text_based_features()
-print(data_loader.data.info())
+feature_creator.create_text_based_features(X_train_augmented)
+feature_creator.create_text_based_features(X_test_raw)
 
-data_loader.data.to_csv('data/movie_data_featurecreation.csv', index=False)
+# %% 4- Embeddings and Data Splitting
 
-# %% 3- Data Splits and Encoding
-
-X, y = data_preprocessing.embeddings()
-
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train, y_train, X_test, y_test = data_preprocessing.embeddings(X_train_augmented, y_train_augmented, X_test_raw, y_test_raw)
 
 X_train, X_validation, y_train, y_validation = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
 
@@ -685,7 +816,9 @@ models_dict = {
 results_dict = {
     "LogisticRegression": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0},
     "RandomForest": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0},
-    "SVM": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0}
+    "SVM": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0},
+    "Bagging": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0},
+    "AdaBoost": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0}
 }
 
 # Initialize the ModelBuilding class with the training, testing and validation data
@@ -693,8 +826,8 @@ builder = ModelBuilding(np.array(X_train), np.array(y_train), np.array(X_test), 
                         np.array(X_validation), np.array(y_validation))
 
 # Supervised Learning Algorithms
-builder.build_models("LogisticRegression", models_dict, results_dict)
-builder.build_models("RandomForest", models_dict, results_dict)
+#builder.build_models("LogisticRegression", models_dict, results_dict)
+#builder.build_models("RandomForest", models_dict, results_dict)
 builder.build_models("SVM", models_dict, results_dict)
 
 # Serialize the builder object
@@ -718,3 +851,11 @@ elif builder.best_model_checked == SVC:
 
 print("\nBest model:", best_model_name)
 print("Best model parameters:", builder.best_model_params_checked)
+
+# Initialize the BaggingClassifier class with the best model
+bagging = BaggingClassifier(builder.best_model_checked(**builder.best_model_params_checked), np.array(X_train),
+                            np.array(y_train), np.array(X_test), np.array(y_test))
+# Examine the bagging ensemble
+bagging.examine_bagging()
+# Evaluate the bagging ensemble on the test set
+bagging.evaluate(results_dict)
