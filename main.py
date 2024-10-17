@@ -1,37 +1,43 @@
 import joblib
-import pickle
-import os
-import pandas as pd
-import re
-import nltk
-import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
-import random
-from docutils.parsers.rst.directives.misc import Class
-from wordcloud import WordCloud
-from pycm import ConfusionMatrix
+import nltk
 from nltk import word_tokenize
 from nltk.corpus import stopwords
-from nltk.corpus import wordnet
+import numpy as np
+import os
+import pandas as pd
+import pickle
+from pycm import ConfusionMatrix
+import random
+import re
+import spacy
+import textstat
+
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split, KFold
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
 from sklearn.svm import SVC
-from sklearn.model_selection import GridSearchCV
-from sklearn.metrics import accuracy_score, recall_score, confusion_matrix
+from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.decomposition import PCA
+from sklearn.decomposition import LatentDirichletAllocation
 from sklearn.base import clone
 from textblob import TextBlob
+import warnings
+
+from transformers import BertTokenizer, BertModel
+from wordcloud import WordCloud
 
 # Download necessary resources for NLTK
 nltk.download('stopwords')
 nltk.download('wordnet')
 nltk.download('punkt')
 nltk.download('punkt_tab')
-from nltk.corpus import wordnet
+
+nlp = spacy.load('en_core_web_sm')
+
+warnings.filterwarnings("ignore")
 
 class DataLoader:
 
@@ -62,6 +68,7 @@ class DataLoader:
         except FileNotFoundError:
             print("File not found. Please check the file path.")
 
+
 class DataManipulator(DataLoader):
 
     def __init__(self, filename, column_names, target):
@@ -84,20 +91,14 @@ class DataManipulator(DataLoader):
         print("\nStatistical distribution of each variable:")
         print(self.data.describe())
 
-class DataPreProcessing:
 
-    def __init__(self, data_loader, glove_file_path, reduce_dims=True, num_components=50):
+class DataProcessing:
+
+    def __init__(self, data_loader):
         self.data_loader = data_loader
         self.stop_words = set(stopwords.words('english'))
-        self.embeddings_index = self._load_glove_embeddings(glove_file_path)
-        self.reduce_dims = reduce_dims
-        self.num_components = num_components
 
-        # Sanity check
         self._sanity_check()
-
-        # Apply text cleaning
-        self._clean_text()
 
     def _sanity_check(self):
         try:
@@ -109,17 +110,52 @@ class DataPreProcessing:
             print(f"Error occurred: {error}")
             return False
 
-    def _clean_text(self):
-        # Lowercase the text
-        self.data_loader.data['plot'] = self.data_loader.data['plot'].str.lower()
+    def clean_text(self, data = None):
 
-        # Remove punctuation
-        self.data_loader.data['plot'] = self.data_loader.data['plot'].apply(lambda x: re.sub(r'[^\w\s]', '', x))
+        if data is None:
+            # Lowercase the text
+            data_loader.data['plot'] = data_loader.data['plot'].str.lower()
+            # Remove punctuation
+            data_loader.data['plot'] = data_loader.data['plot'].apply(lambda x: re.sub(r'[^\w\s]', '', x))
+            # Remove stopwords
+            data_loader.data['plot'] = data_loader.data['plot'].apply(
+                lambda x: ' '.join([word for word in x.split() if word not in self.stop_words]))
+        else:
+            data['plot'] = data['plot'].str.lower()
+            data['plot'] = data['plot'].apply(lambda x: re.sub(r'[^\w\s]', '', x))
+            data['plot'] = data['plot'].apply(
+                lambda x: ' '.join([word for word in x.split() if word not in self.stop_words]))
+            return data
 
-        # Remove stopwords
-        self.data_loader.data['plot'] = self.data_loader.data['plot'].apply(
-            lambda x: ' '.join([word for word in x.split() if word not in self.stop_words])
-        )
+
+class BERTEmbeddings:
+    #load pre-trained BERT model and tokenizer
+    def __init__(self, model_name='bert-base-uncased'):
+        self.tokenizer = BertTokenizer.from_pretrained(model_name)
+        self.model = BertModel.from_pretrained(model_name)
+
+    def get_embeddings(self, text):
+        #tokenize the text
+        inputs = self.tokenizer(text, return_tensors='pt', truncation=True, padding=True, max_length=512)
+
+        #get the embeddings
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            plot_embeddings = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
+        return plot_embeddings
+
+
+class Embeddings:
+
+    def __init__(self, glove_file_path=None):
+
+        self.bert_embedder = BERTEmbeddings()
+
+        # Load GloVe embeddings if the file path is provided
+        if glove_file_path:
+            self.embeddings_index = self._load_glove_embeddings(glove_file_path)
+        else:
+            self.embeddings_index = None
 
     def _load_glove_embeddings(self, file_path):
         """Load GloVe pre-trained embeddings into a dictionary."""
@@ -133,10 +169,10 @@ class DataPreProcessing:
         print(f"Loaded {len(embeddings_index)} word vectors from GloVe.")
         return embeddings_index
 
-    def _plot_to_embedding(self, text):
+    def _glove_plot_to_embedding(self, plot):
         """Convert a plot of text into a dense vector representation using GloVe."""
-        words = text.split()
-        embedding_dim = 100  # Adjust based on the GloVe vector size
+        words = plot.split()
+        embedding_dim = 100  # Adjust based on GloVe vector size
         plot_vector = np.zeros((embedding_dim,))
         word_count = 0
 
@@ -148,92 +184,121 @@ class DataPreProcessing:
 
         if word_count > 0:
             plot_vector /= word_count
-
-        if word_count == 0:
-            print(f"No valid words found for text: {text}")  # Debugging statement
-            return np.nan  # or return a zero vector
-
         return plot_vector
 
-    def embeddings(self, X_train_augmented, y_train_augmented, X_test_raw, y_test_raw):
-        """Create dense vector representations for both train and test data and return encoded X and y."""
+    def _bert_plot_to_embedding(self, plot):
+        """Convert a plot of text into a dense vector representation using BERT."""
+        embedding = self.bert_embedder.get_embeddings(plot)  # Call the BERT embedding method
+        return embedding
 
-        # ----- Processing X_train_augmented -----
+    def _plot_to_embedding(self, plot, method="glove"):
+        """
+        Convert a plot to an embedding using the selected method (GloVe or BERT).
 
-        # Create plot embeddings for X_train_augmented
-        X_train_augmented['plot_embedding'] = X_train_augmented['plot'].apply(self._plot_to_embedding)
+        Parameters:
+        plot (str): The plot text to embed.
+        method (str): The embedding method to use ("glove" or "bert").
+
+        Returns:
+        np.array: The resulting embedding vector.
+        """
+        if method == "glove":
+            return self._glove_plot_to_embedding(plot)
+        elif method == "bert":
+            return self._bert_plot_to_embedding(plot)
+        else:
+            raise ValueError(f"Unknown embedding method: {method}")
+
+    def embedding_df(self, X, method="glove"):
+        """Create plot embeddings for X using the selected embedding method."""
+        X['plot_embedding'] = X['plot'].apply(lambda plot: self._plot_to_embedding(plot, method=method))
 
         # Stack the plot embeddings into a matrix
-        plot_embeddings_train = np.vstack(X_train_augmented['plot_embedding'].values)
+        plot_embeddings = np.vstack(X['plot_embedding'].values)
 
-        # Apply PCA to reduce dimensionality
-        if self.reduce_dims:
-            pca = PCA(n_components=self.num_components)
-            plot_embeddings_train = pca.fit_transform(plot_embeddings_train)
-            print(f"Reduced training plot embeddings to {self.num_components} dimensions using PCA.")
+        plot_embeddings_df = pd.DataFrame(plot_embeddings,
+                                          columns=[f'embedding_{i}' for i in range(plot_embeddings.shape[1])])
 
-        # Convert plot embeddings into a DataFrame
-        plot_embeddings_train_df = pd.DataFrame(plot_embeddings_train,
-                                                columns=[f'embedding_{i}' for i in
-                                                         range(plot_embeddings_train.shape[1])])
+        return plot_embeddings_df
 
-        # Drop unnecessary columns and concatenate the plot embeddings
-        X_train_processed = pd.concat([X_train_augmented.drop(columns=['plot', 'title', 'plot_embedding']),
+    def embedding_X(self, X_train_raw, X_test_raw, method="glove"):
+        """
+        Create dense vector representations for both train and test data and return encoded X and y.
+
+        Parameters:
+        method (str): The embedding method to use ("glove" or "bert").
+        """
+
+        # ----- Processing X_train_augmented -----
+        plot_embeddings_train_df = self.embedding_df(X_train_raw, method=method)
+
+        X_train_raw.reset_index(drop=True, inplace=True)
+        plot_embeddings_train_df.reset_index(drop=True, inplace=True)
+
+        X_train_processed = pd.concat([X_train_raw.drop(columns=['plot', 'title', 'plot_embedding']),
                                        plot_embeddings_train_df], axis=1)
 
-        # Label encode categorical features in X_train_augmented
+        # Initialize label encoders dictionary
+        label_encoders_X = {}
+
+        # Encode 'language' and 'director' in training set
         for col in ['language', 'director']:
             le = LabelEncoder()
             X_train_processed[col] = le.fit_transform(X_train_processed[col].astype(str))
+            label_encoders_X[col] = le  # Save the encoder to use for test data later
 
         # ----- Processing X_test_raw -----
+        plot_embeddings_test_df = self.embedding_df(X_test_raw, method=method)
 
-        # Create plot embeddings for X_test_raw
-        X_test_raw['plot_embedding'] = X_test_raw['plot'].apply(self._plot_to_embedding)
-
-        # Stack the plot embeddings into a matrix
-        plot_embeddings_test = np.vstack(X_test_raw['plot_embedding'].values)
-
-        # Apply PCA to reduce dimensionality
-        if self.reduce_dims:
-            plot_embeddings_test = pca.transform(plot_embeddings_test)  # Use the same PCA model from training
-            print(f"Reduced test plot embeddings to {self.num_components} dimensions using PCA.")
-
-        # Convert plot embeddings into a DataFrame
-        plot_embeddings_test_df = pd.DataFrame(plot_embeddings_test,
-                                               columns=[f'embedding_{i}' for i in range(plot_embeddings_test.shape[1])])
-
-        # Reset the index of the test DataFrame to avoid any alignment issues
         X_test_raw.reset_index(drop=True, inplace=True)
         plot_embeddings_test_df.reset_index(drop=True, inplace=True)
 
-        # Drop unnecessary columns and concatenate the plot embeddings
         X_test_processed = pd.concat([X_test_raw.drop(columns=['plot', 'title', 'plot_embedding']),
                                       plot_embeddings_test_df], axis=1)
 
-        # Label encode categorical features in X_test_raw
+        # Encode 'language' and 'director' in test set, handling unseen labels
         for col in ['language', 'director']:
-            le = LabelEncoder()
-            X_test_processed[col] = le.fit_transform(X_test_processed[col].astype(str))
-
-        # Check for NaN values in processed test features
-        for column in X_test_processed.columns:
-            nan_count = X_test_processed[column].isnull().sum()
-            if nan_count > 0:
-                print(f"NaN values found in test column '{column}': {nan_count}")
-
-        # ----- Encoding target variables -----
-        label_encoder = LabelEncoder()
-        y_train_encoded = label_encoder.fit_transform(y_train_augmented)
-        y_test_encoded = label_encoder.fit_transform(y_test_raw)
+            X_test_processed[col] = X_test_processed[col].apply(
+                lambda x: label_encoders_X[col].transform([x])[0] if x in label_encoders_X[col].classes_ else -1
+            )
 
         # ----- Standardizing feature matrices -----
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train_processed)
         X_test_scaled = scaler.transform(X_test_processed)
 
-        print("Dense embeddings created, reduced, and concatenated with other features for both training and test sets.")
-        return X_train_scaled, y_train_encoded, X_test_scaled, y_test_encoded
+        print(
+            f"{method.capitalize()} embeddings created and concatenated with other features for both training and test sets.")
+        return X_train_scaled, X_test_scaled, scaler, label_encoders_X
+
+    def encode_target(self, y_train_raw, y_test_raw, ):
+
+        le = LabelEncoder()
+        y_train_encoded = le.fit_transform(y_train_raw)
+        y_test_encoded = le.fit_transform(y_test_raw)
+
+        return y_train_encoded, y_test_encoded
+
+    def embedding_test(self, test_data, scaler, label_encoders_X, method="glove"):
+
+        plot_embeddings_test_data_df = self.embedding_df(test_data, method=method)
+
+        test_data.reset_index(drop=True, inplace=True)
+        plot_embeddings_test_data_df.reset_index(drop=True, inplace=True)
+
+        test_data_processed = pd.concat([test_data.drop(columns=['plot', 'title', 'plot_embedding']),
+                                       plot_embeddings_test_data_df], axis=1)
+
+        for col in ['language', 'director']:
+            test_data_processed[col] = test_data_processed[col].apply(
+                lambda x: label_encoders_X[col].transform([x])[0] if x in label_encoders_X[col].classes_ else -1
+            )
+
+        test_data_scaled = scaler.transform(test_data_processed)
+
+        print(f"{method.capitalize()} embeddings created and concatenated with other features for the test set with no labels.")
+        return test_data_scaled
+
 
 class DataVisualization:
 
@@ -315,64 +380,191 @@ class DataVisualization:
                     plt.axis('off')
                     plt.show()
 
-class FeatureCreation:
 
+class FeatureCreation:
     def __init__(self):
         pass
 
-    def create_text_based_features(self, data):
-
-        # Create Plot Length Feature
+    def create_features(self, data):
+        # Existing features
         data['plot_length'] = data['plot'].apply(lambda x: len(str(x).split()))
         print("Created plot_length feature\n")
-        # Create Average Word Length Feature
-        data['avg_word_length'] = data['plot'].apply(
-            lambda x: np.mean([len(word) for word in str(x).split()]))
+
+        data['sentiment_polarity'] = data['plot'].apply(lambda x: TextBlob(str(x)).sentiment.polarity)
+        data['sentiment_subjectivity'] = data['plot'].apply(lambda x: TextBlob(str(x)).sentiment.subjectivity)
+        print("Created sentiment_polarity and sentiment_subjectivity features\n")
+
+        # Lexical Diversity (Type-Token Ratio)
+        data['type_token_ratio'] = data['plot'].apply(lambda x: len(set(str(x).split())) / max(1, len(str(x).split())))
+        print("Created type_token_ratio feature\n")
+
+        # Average Word Length
+        data['avg_word_length'] = data['plot'].apply(self._average_word_length)
         print("Created avg_word_length feature\n")
-        # Create Unique Word Count Feature
-        data['unique_word_count'] = data['plot'].apply(
-            lambda x: len(set(str(x).split())))
+
+        # Unique Word Count
+        data['unique_word_count'] = data['plot'].apply(self._unique_word_count)
         print("Created unique_word_count feature\n")
-        # Create Sentiment Polarity Feature
-        data['sentiment_polarity'] = data['plot'].apply(
-            lambda x: TextBlob(str(x)).sentiment.polarity)
-        print("Created sentiment_polarity feature\n")
+
+        # POS Tags Ratios
+        data['pos_noun_ratio'], data['pos_verb_ratio'], data['pos_adj_ratio'] = zip(*data['plot'].apply(self._pos_tag_ratios))
+        print("Created POS tag ratio features\n")
+
+        # Named Entity Count
+        data['entity_count'] = data['plot'].apply(self._entity_count)
+        print("Created named entity count feature\n")
+
+        # Flesch-Kincaid Readability Score
+        data['flesch_kincaid'] = data['plot'].apply(self._flesch_kincaid_score)
+        print("Created Flesch-Kincaid readability score feature\n")
+
+        # Topic Modeling with LDA
+        data['lda_topic_0'], data['lda_topic_1'] = self._lda_topic_features(data['plot'])
+        print("Created LDA topic features\n")
+
+    def _average_word_length(self, text):
+        """Calculate average word length in the plot."""
+        words = str(text).split()
+        if len(words) == 0:
+            return 0
+        return sum(len(word) for word in words) / len(words)
+
+    def _unique_word_count(self, text):
+        """Count the number of unique words in the plot."""
+        words = str(text).split()
+        return len(set(words))
+
+    def _pos_tag_ratios(self, text):
+        """Calculate the ratio of nouns, verbs, and adjectives in the plot."""
+        doc = nlp(text)
+        total_tokens = len(doc)
+        noun_count = sum(1 for token in doc if token.pos_ == 'NOUN')
+        verb_count = sum(1 for token in doc if token.pos_ == 'VERB')
+        adj_count = sum(1 for token in doc if token.pos_ == 'ADJ')
+
+        return noun_count / total_tokens, verb_count / total_tokens, adj_count / total_tokens
+
+    def _entity_count(self, text):
+        """Count the number of named entities in the plot."""
+        doc = nlp(text)
+        return len(doc.ents)
+
+    def _flesch_kincaid_score(self, text):
+        """Calculate the Flesch-Kincaid readability score."""
+        return textstat.flesch_kincaid_grade(text)
+
+    def _lda_topic_features(self, plots):
+        """Generate LDA topic features."""
+        vectorizer = TfidfVectorizer(max_features=500)
+        X = vectorizer.fit_transform(plots)
+
+        lda = LatentDirichletAllocation(n_components=2, random_state=42)
+        lda_topics = lda.fit_transform(X)
+
+        return lda_topics[:, 0], lda_topics[:, 1]
+
+
+class FeatureEvaluator:
+    def __init__(self, X_train, y_train, model=None):
+        """
+        Initialize the FeatureEvaluator with training data and a model.
+
+        Parameters:
+        X_train (DataFrame or numpy array): The training features.
+        y_train (DataFrame or numpy array): The target variable.
+        model (sklearn model): A machine learning model. Default is RandomForestClassifier.
+        """
+        self.X_train = X_train
+        self.y_train = y_train
+        self.model = model if model is not None else RandomForestClassifier(n_estimators=100, random_state=42)
+
+        # Check if X_train is a DataFrame to extract feature names
+        if isinstance(X_train, pd.DataFrame):
+            self.feature_names = X_train.columns
+        else:
+            self.feature_names = [f"Feature {i}" for i in range(X_train.shape[1])]
+
+    def evaluate_importance(self):
+        """
+        Train the model and calculate feature importance.
+        """
+        # Fit the model
+        self.model.fit(self.X_train, self.y_train)
+
+        # Get feature importances
+        self.importances = self.model.feature_importances_
+        self.indices = np.argsort(self.importances)[::-1]  # Sort in descending order
+
+        # Get feature names
+        if isinstance(self.X_train, pd.DataFrame):
+            feature_names = self.X_train.columns
+        else:
+            feature_names = [f"Feature {i}" for i in range(self.X_train.shape[1])]
+
+        # Print the ranking of features with names
+        print("Feature ranking:")
+        for i in range(self.X_train.shape[1]):
+            print(f"{i + 1}. {feature_names[self.indices[i]]} ({self.importances[self.indices[i]]})")
+
+        return self.importances
+
+    def plot_importance(self):
+        """
+        Plot the feature importance.
+        """
+        # Plot the feature importances
+        plt.figure(figsize=(10, 6))
+        plt.title("Feature Importances")
+        plt.bar(range(self.X_train.shape[1]), self.importances[self.indices], align="center")
+        plt.xticks(range(self.X_train.shape[1]), [self.feature_names[i] for i in self.indices], rotation=90)
+        plt.xlabel("Feature")
+        plt.ylabel("Importance")
+        plt.xlim([-1, self.X_train.shape[1]])
+        plt.tight_layout()
+        plt.show()
+
+    def get_top_features(self, n=10):
+        """
+        Get the top N features based on importance.
+
+        Parameters:
+        n (int): Number of top features to return.
+
+        Returns:
+        list: Names of the top N features.
+        """
+        top_indices = self.indices[:n]
+        top_features = [self.feature_names[i] for i in top_indices]
+        return top_features
+
 
 class DataAugmentation:
 
     def __init__(self):
         pass
 
-    def get_synonyms(self, word):
-        synonyms = []
-        for syn in wordnet.synsets(word):
-            for lemma in syn.lemmas():
-                synonyms.append(lemma.name())
-        return set(synonyms)
-
-    def synonym_replacement(self, text, n_replacements):
+    def random_insertion(self, text, n_insertions=3):
+        """Randomly insert adjectives or relevant genre words into the plot."""
         words = word_tokenize(text)
-        new_words = words.copy()
+        insertions = ["dark", "mysterious", "frightening", "intense", "haunting", "thrilling"]
 
-        # List of indices where replacements will happen
-        indices_to_replace = random.sample(range(len(words)), min(n_replacements, len(words)))
-        successful_replacements = 0
-        replacements_log = []
+        for _ in range(n_insertions):
+            insert_word = random.choice(insertions)
+            insert_position = random.randint(0, len(words))
+            words.insert(insert_position, insert_word)
 
-        for idx in indices_to_replace:
-            word = words[idx]
-            synonyms = self.get_synonyms(word)
-            if synonyms:
-                # Replace the word with a random synonym if available
-                synonym = random.choice(list(synonyms))
-                new_words[idx] = synonym
-                successful_replacements += 1
-                replacements_log.append((word, synonym))
+        new_text = ' '.join(words)
+        return new_text
 
-        new_plot = ' '.join(new_words)
-        return new_plot
+    def random_deletion(self, text, p=0.2):
+        """Randomly delete words from the plot with probability p."""
+        words = word_tokenize(text)
+        new_words = [word for word in words if random.uniform(0, 1) > p]
 
-    def augment_data(self, data, n_augmentations):
+        new_text = ' '.join(new_words)
+        return new_text
+
+    def augment_data(self, data, n_augmentations=2):
         original_row_count = len(data)
         new_rows = []
 
@@ -383,7 +575,13 @@ class DataAugmentation:
             # Generate n_augmentations new rows with modified plots
             for _ in range(n_augmentations):
                 new_row = original_row.copy()  # Keep other columns the same
-                new_row['plot'] = self.synonym_replacement(row['plot'], n_replacements=50)
+
+                # Apply random insertion or random deletion
+                if random.random() > 0.5:
+                    new_row['plot'] = self.random_insertion(row['plot'])
+                else:
+                    new_row['plot'] = self.random_deletion(row['plot'])
+
                 new_rows.append(new_row)
 
         # Create a DataFrame from the new rows and append to the original data
@@ -397,15 +595,8 @@ class DataAugmentation:
         print(f"Augmented rows: {augmented_row_count}")
         print(f"Total rows after augmentation: {total_row_count}")
 
-        # Check for NaN values in the augmented data
-        nan_values = augmented_data.isnull().sum()
-        nan_columns = nan_values[nan_values > 0]  # Filter columns with NaN values
-        if nan_columns.empty:
-            print("No NaN values found in the augmented data.")
-        else:
-            print(f"NaN values found in the following columns:\n{nan_columns}")
-
         return augmented_data
+
 
 class ModelOptimization:
 
@@ -506,6 +697,80 @@ class ModelOptimization:
         print("Best accuracy:", best_accuracy)
         return best_params
 
+    def optimize_mlp(self, population_size=20, max_generations=50, layer_range=(1, 100),
+                     activation=('logistic', 'tanh')):
+        """
+        Optimizes the parameters for Multi-layer Perceptron (MLP) classifier.
+
+        Parameters:
+            population_size (int): Size of the population for optimization. Default is 20.
+            max_generations (int): Maximum number of generations for optimization. Default is 50.
+            layer_range (tuple): Range of neurons in hidden layers. Default is (1, 100).
+            activation (tuple): Activation functions to try. Default is ('logistic', 'tanh').
+
+        Returns:
+            tuple: Best parameters for MLP (number of neurons, activation function), best model, and best accuracy.
+        """
+        # Initialize the population
+        population = []
+        for _ in range(population_size):
+            neurons = random.randint(*layer_range)
+            activation_selected = random.choice(activation)
+            population.append((neurons, activation_selected))
+
+        best_model = None  # To store the best model
+        best_params = None  # To store the best parameters
+        best_accuracy = 0  # To store the best accuracy
+
+        # Random evolutionary search
+        for generation in range(max_generations):
+            print(f"Generation {generation + 1}/{max_generations}")
+            new_population = []
+            for i, (neurons, activation_selected) in enumerate(population):
+                # Skip the first iteration from generation 1 onwards since it is the best element found in the previous iteration
+                if generation != 0 and i == 0:
+                    new_population.append((best_params, best_accuracy))
+                    continue
+                print("Generation ", generation, " element ", i)
+
+                # Train the MLP model
+                mlp = MLPClassifier(hidden_layer_sizes=(neurons,), activation=activation_selected, early_stopping=True)
+                mlp.fit(self.X_train, self.y_train)
+                accuracy = mlp.score(self.X_val, self.y_val)
+                new_population.append(((neurons, activation_selected), accuracy))
+                print(f"Neurons: {neurons}, activation: {activation_selected}, Accuracy: {accuracy}")
+
+                # Update the best model, params, and accuracy
+                if accuracy > best_accuracy:
+                    best_accuracy = accuracy
+                    best_params = (neurons, activation_selected)
+                    best_model = mlp
+
+            new_population.sort(key=lambda x: x[1], reverse=True)
+            best_params, best_accuracy = new_population[0]
+            population = [best_params]
+
+            # Use the parameters of the best individual to bias the generation of new individuals
+            best_neurons, best_activation = best_params
+
+            # Break when only 2 individuals are left
+            if population_size <= 2:
+                break
+            population_size -= 1
+
+            # Generate the new population
+            for _ in range(1, population_size):
+                # Randomly generate neurons with a bias towards the best_neurons
+                neurons = random.randint(int(np.ceil(best_neurons - 20)) + 1, int(best_neurons + 20))
+                # Randomly select activation function
+                activation_selected = random.choice(activation)
+                population.append((neurons, activation_selected))
+
+        print("Best MLP parameters:", best_params)
+        print("Best accuracy:", best_accuracy)
+        return best_params, best_model
+
+
 class CrossValidator:
 
     def __init__(self, k=5):
@@ -516,7 +781,7 @@ class CrossValidator:
         self.accuracy_scores = []
         self.sensitivity_scores = []
         self.specificity_scores = []
-
+        self.f1_scores = []  # Add a list to store F1-scores
     def cross_validate(self, model, X, y):
 
         for train_index, val_index in self.kf.split(X):  # Split the data into training and validation sets
@@ -531,12 +796,14 @@ class CrossValidator:
             self.accuracy_scores.append(accuracy_score(y_val, y_pred))
             self.sensitivity_scores.append(float(self.cm.TPR_Macro))
             self.specificity_scores.append(float(self.cm.TNR_Macro))
+            self.f1_scores.append(f1_score(y_val, y_pred, average='macro'))  # Calculate F1-score
 
         avg_accuracy = sum(self.accuracy_scores) / len(self.accuracy_scores)
         avg_sensitivity = sum(self.sensitivity_scores) / len(self.sensitivity_scores)
         avg_specificity = sum(self.specificity_scores) / len(self.specificity_scores)
+        avg_f1_score = sum(self.f1_scores) / len(self.f1_scores)  # Average F1-score
 
-        return avg_accuracy, avg_sensitivity, avg_specificity
+        return avg_accuracy, avg_sensitivity, avg_specificity, avg_f1_score
 
     def evaluate_on_test_set(self, model, X_test, y_test):
 
@@ -545,11 +812,13 @@ class CrossValidator:
         accuracy = cm.Overall_ACC
         sensitivity = cm.TPR_Macro
         specificity = cm.TNR_Macro
-        return accuracy, sensitivity, specificity
+        f1 = f1_score(y_test, y_pred, average='macro')  # F1-score on the test set
+        return accuracy, sensitivity, specificity, f1
+
 
 class ModelBuilding:
 
-    def __init__(self, X_train, y_train, X_test, y_test, X_val, y_val, k=5, save_all=True):
+    def __init__(self, X_train, y_train, X_test, y_test, X_val, y_val, encoder, k=5, save_all=True):
 
         self.X_train = X_train
         self.y_train = y_train
@@ -557,12 +826,14 @@ class ModelBuilding:
         self.y_test = y_test
         self.X_val = X_val
         self.y_val = y_val
+        self.encoder = encoder
         self.k = k
         self.save_all = save_all
         self.best_model = None
         self.best_model_name = None
         self.best_params = None
         self.best_score = -1
+        #self.best_test_score = -1
         self.best_model_changed = False
         self.history = {}
 
@@ -604,11 +875,20 @@ class ModelBuilding:
                 model_params_check['kernel'] = svm_params[1]
                 model_params_check['gamma'] = svm_params[2]
                 params = svm_params
+            elif model_name == "MLP":  # Optimize the parameters for MLP
+                mlp_params = model_optimization.optimize_mlp(**model_params)
+                model_params_check['hidden_layer_sizes'] = (mlp_params[0],)
+                model_params_check['activation'] = mlp_params[1]
+                params, mlp_model = mlp_params
             else:
                 raise ValueError("Model type is not supported.")
 
-            model_instance = model(**model_params_check)  # Create an instance of the model with the optimized parameters
-            model_instance.fit(self.X_train, self.y_train)  # Fit the model to the training data
+            if model_name == "MLP":
+                model_instance = mlp_model
+            else:
+                model_instance = model(**model_params_check)  # Create an instance of the model with the optimized parameters
+                model_instance.fit(self.X_train, self.y_train)  # Fit the model to the training data
+
             val_score = model_instance.score(self.X_val, self.y_val)  # Calculate the accuracy on the validation data
             self.history[str(name)] = val_score  # Store the validation score in the history dictionary
 
@@ -632,28 +912,37 @@ class ModelBuilding:
             print(f"\nPreforming cross-validation on the {model_name} model:")
 
             # Performance of the model during cross-validation
-            avg_accuracy_cv, avg_sensitivity_cv, avg_specificity_cv = self.kf_cv.cross_validate(model_instance,
-                                                                                                self.X_train,
-                                                                                                self.y_train)
+            avg_accuracy_cv, avg_sensitivity_cv, avg_specificity_cv, avg_f1_score_cv = self.kf_cv.cross_validate(
+                model_instance, self.X_train, self.y_train)
 
             print("Average accuracy during cross-validation:", avg_accuracy_cv)
             print("Average sensitivity during cross-validation:", avg_sensitivity_cv)
             print(f"Average specificity during cross-validation: {avg_specificity_cv}\n")
+            print(f"Average F1-score during cross-validation: {avg_f1_score_cv}\n")
 
             print(f"\nPerformance of the {model_name} model on the Test set:")
 
             # Performance of the model on the test set
-            accuracy_test, sensitivity_test, specificity_test = self.kf_cv.evaluate_on_test_set(model_instance,
-                                                                                                self.X_test,
-                                                                                                self.y_test)
+            accuracy_test, sensitivity_test, specificity_test, f1_score_test = self.kf_cv.evaluate_on_test_set(
+                model_instance,
+                self.X_test,
+                self.y_test)
             print("Test set accuracy:", accuracy_test)
             print("Test set sensitivity:", sensitivity_test)
             print(f"Test set specificity: {specificity_test}\n")
+            print(f"Test set F1-score: {f1_score_test}\n")
 
             # Store the results in the results dictionary
-            results_dict[model_name]['Accuracy'] = float(accuracy_test)
-            results_dict[model_name]['Sensitivity'] = float(sensitivity_test)
-            results_dict[model_name]['Specificity'] = float(specificity_test)
+            if self.encoder == 'glove':
+                results_dict[model_name + ' with Glove Embeddings']['Accuracy'] = float(accuracy_test)
+                results_dict[model_name + ' with Glove Embeddings']['Sensitivity'] = float(sensitivity_test)
+                results_dict[model_name + ' with Glove Embeddings']['Specificity'] = float(specificity_test)
+                results_dict[model_name + ' with Glove Embeddings']['F1_score'] = float(f1_score_test)
+            elif self.encoder == 'bert':
+                results_dict[model_name + ' with BERT Embeddings']['Accuracy'] = float(accuracy_test)
+                results_dict[model_name + ' with BERT Embeddings']['Sensitivity'] = float(sensitivity_test)
+                results_dict[model_name + ' with BERT Embeddings']['Specificity'] = float(specificity_test)
+                results_dict[model_name + ' with BERT Embeddings']['F1_score'] = float(f1_score_test)
 
             # Print the best model and its parameters
             print("\nOptimization finished, history:\n")
@@ -680,6 +969,7 @@ class ModelBuilding:
         full_path = os.path.join(folder_path, filename)
         print("Saving model as", filename)
         joblib.dump(model, full_path)
+
 
 class BaggingClassifier:
 
@@ -748,12 +1038,41 @@ class BaggingClassifier:
         self.accuracy_scores = accuracy_score(self.y_test, self.y_pred)
         self.sensitivity_scores = float(self.cm.TPR_Macro)
         self.specificity_scores = float(self.cm.TNR_Macro)
+        self.f1_score_value = f1_score(self.y_test, self.y_pred, average='macro')  # F1-score
 
         results_dict['Bagging']['Accuracy'] = float(self.accuracy_scores)
         results_dict['Bagging']['Sensitivity'] = float(self.sensitivity_scores)
         results_dict['Bagging']['Specificity'] = float(self.specificity_scores)
+        results_dict['Bagging']['F1_score'] = float(self.f1_score_value)  # Store F1-score in results
 
-        print(f"Accuracy: {self.accuracy_scores}, Sensitivity: {self.sensitivity_scores}, Specificity: {self.specificity_scores}")
+        print(f"Accuracy: {self.accuracy_scores}, Sensitivity: {self.sensitivity_scores}, "
+              f"Specificity: {self.specificity_scores}, F1-score: {self.f1_score_value}")
+
+
+class ModelTester:
+    def __init__(self, builder, label_encoder, test_data_encoded, output_csv):
+        """
+        Initialize with the best model, PCA, scaler, and preprocessing configurations.
+        """
+        self.best_model = builder.best_model
+        self.label_encoder = label_encoder
+        self.test_data_encoded = test_data_encoded
+        self.output_csv = output_csv
+
+    def predict(self):
+
+        # Make predictions
+        predictions = self.best_model.predict(self.test_data_encoded)
+
+        # Decode predicted genre numbers back to genre names
+        predicted_genres = self.label_encoder.inverse_transform(predictions)
+
+        # Add predictions to the original data
+        self.test_data_encoded['predicted_genre'] = predicted_genres
+
+        # Save to CSV
+        self.test_data_encoded.to_csv(self.output_csv, index=False)
+        print(f"Predictions saved to {self.output_csv}")
 
 # %% 1- Pre Processing and EDA
 
@@ -764,93 +1083,222 @@ glove_file_path = 'Glove/glove.6B.100d.txt'
 # Load the data
 data_loader = DataManipulator(filename, column_names ,'genre')
 
+test_no_labels_filename = 'data/test_no_labels.txt'
+test_no_labels_column_names = ['title', 'language', 'director', 'plot']
+test_no_labels_data = pd.read_csv(test_no_labels_filename, sep='\t', names=test_no_labels_column_names)
+
 # Preprocess the data
-data_preprocessing = DataPreProcessing(data_loader, glove_file_path)
+data_processing = DataProcessing(data_loader)
+data_processing.clean_text()
+test_data_preprocessed = data_processing.clean_text(test_no_labels_data)
 
 data_loader.data.to_csv('data/movie_data_preprocessed.csv', index=False)
+test_data_preprocessed.to_csv('data/movie_data_no_labels_preprocessed.csv', index=False)
 
 # Visualize the data
 #data_visualization = DataVisualization(data_loader, ['pie', 'bar', 'hist', 'wordcloud'])
 #data_visualization.plots(['pie', 'bar', 'hist', 'wordcloud'])
 
-# %% 2- Data Augmentation and Data Splitting
+# %% 2- Feature Creation
+
+# Initialize the FeatureCreation class with the data
+feature_creator = FeatureCreation()
+# Create features
+print("\nFeatures Created:\n")
+feature_creator.create_features(data_loader.data)
+feature_creator.create_features(test_data_preprocessed)
+
+# Implement some kind of data visualization
+
+data_loader.data.to_csv('data/movie_data_featurecreation.csv', index=False)
+test_data_preprocessed.to_csv('data/movie_data_no_labels_featurecreation.csv', index=False)
+
+# %% 3- Data Splitting
 
 X_raw = data_loader.data.drop(columns=[data_loader.target])
 y_raw = data_loader.data[data_loader.target]
 
 X_train_raw, X_test_raw, y_train_raw, y_test_raw = train_test_split(X_raw, y_raw, test_size=0.2, random_state=42)
 
-data_augmentation = DataAugmentation()
-X_train_augmented = data_augmentation.augment_data(X_train_raw, n_augmentations=1)
-y_train_augmented = pd.concat([y_train_raw] * (X_train_augmented.shape[0] // X_train_raw.shape[0]), ignore_index=True)
-
-# %% 3- Feature Creation
-
-# Initialize the FeatureCreation class with the data
-feature_creator = FeatureCreation()
-
-print("\nFeatures Created:\n")
-# Create text-based features
-feature_creator.create_text_based_features(X_train_augmented)
-feature_creator.create_text_based_features(X_test_raw)
-
 # %% 4- Embeddings and Data Splitting
 
-X_train, y_train, X_test, y_test = data_preprocessing.embeddings(X_train_augmented, y_train_augmented, X_test_raw, y_test_raw)
+data_embeddings = Embeddings(glove_file_path)
+X_train_glove, X_test_glove, scaler_glove, label_encoders_X_glove = data_embeddings.embedding_X(X_train_raw,X_test_raw, 'glove')
+X_train_bert, X_test_bert, scaler_bert, label_encoders_X_bert = data_embeddings.embedding_X(X_train_raw,X_test_raw, 'bert')
 
-X_train, X_validation, y_train, y_validation = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
+y_train, y_test = data_embeddings.encode_target(y_train_raw, y_test_raw)
 
-# %% 4- Model Building
+y_test_no_labels_glove = data_embeddings.embedding_test(test_data_preprocessed, scaler_glove, label_encoders_X_glove, 'glove')
+y_test_no_labels_bert = data_embeddings.embedding_test(test_data_preprocessed, scaler_bert, label_encoders_X_bert, 'bert')
+
+X_train_glove, X_validation_glove, y_train_glove, y_validation_glove = train_test_split(X_train_glove, y_train, test_size=0.2, random_state=42)
+X_train_bert, X_validation_bert, y_train_bert, y_validation_bert = train_test_split(X_train_bert, y_train, test_size=0.2, random_state=42)
+
+
+np.save('data/vectors/X_train_glove', X_train_glove)
+np.save('data/vectors/X_test_glove', X_test_glove)
+np.save('data/vectors/X_validation_glove', X_validation_glove)
+np.save('data/vectors/y_train_glove', y_train_glove)
+np.save('data/vectors/y_test_glove', y_test)
+np.save('data/vectors/y_validation_glove', y_validation_glove)
+
+np.save('data/vectors/X_train_bert', X_train_bert)
+np.save('data/vectors/X_test_bert', X_test_bert)
+np.save('data/vectors/X_validation_bert', X_validation_bert)
+np.save('data/vectors/y_train_bert', y_train_bert)
+np.save('data/vectors/y_validation_bert', y_validation_bert)
+
+np.save('data/vectors/y_test_no_labels_glove', y_test_no_labels_glove)
+np.save('data/vectors/y_test_no_labels_bert', y_test_no_labels_bert)
+
+# Save dictionarie label_encoders_X_glove and label_encoders_X_bert
+joblib.dump(label_encoders_X_glove, 'data/vectors/label_encoders_X_glove.pkl')
+joblib.dump(label_encoders_X_bert, 'data/vectors/label_encoders_X_bert.pkl')
+
+# X_train_glove = np.load('data/vectors/X_train_glove.npy')
+# X_test_glove = np.load('data/vectors/X_test_glove.npy')
+# X_validation_glove = np.load('data/vectors/X_validation_glove.npy')
+# y_train_glove = np.load('data/vectors/y_train_glove.npy')
+# y_test = np.load('data/vectors/y_test_glove.npy')
+# y_validation_glove = np.load('data/vectors/y_validation_glove.npy')
+#
+# X_train_bert = np.load('data/vectors/X_train_bert.npy')
+# X_test_bert = np.load('data/vectors/X_test_bert.npy')
+# X_validation_bert = np.load('data/vectors/X_validation_bert.npy')
+# y_train_bert = np.load('data/vectors/y_train_bert.npy')
+# y_validation_bert = np.load('data/vectors/y_validation_bert.npy')
+#
+# y_test_no_labels_glove = np.load('data/vectors/y_test_no_labels_glove.npy')
+# y_test_no_labels_bert = np.load('data/vectors/y_test_no_labels_bert.npy')
+#
+# # Load dictionarie label_encoders_X_glove and label_encoders_X_bert
+# label_encoders_X_glove = joblib.load('data/vectors/label_encoders_X_glove.pkl')
+# label_encoders_X_bert = joblib.load('data/vectors/label_encoders_X_bert.pkl')
+
+evaluator = FeatureEvaluator(X_train, y_train)
+evaluator.evaluate_importance()
+evaluator.plot_importance()
+
+top_features = evaluator.get_top_features(n=10)
+print("Top 10 features:", top_features)
+
+# %% 5- Model Building
+
+# Define the results dictionary
+results_dict = {
+    "LogisticRegression with Glove Embeddings": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0, "F1_score": 0.0},
+    "RandomForest with Glove Embeddings": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0, "F1_score": 0.0},
+    "SVM with Glove Embeddings": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0, "F1_score": 0.0},
+    "MLP with Glove Embeddings": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0, "F1_score": 0.0},
+    "LogisticRegression with BERT Embeddings": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0, "F1_score": 0.0},
+    "RandomForest with BERT Embeddings": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0, "F1_score": 0.0},
+    "SVM with BERT Embeddings": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0, "F1_score": 0.0},
+    "MLP with BERT Embeddings": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0, "F1_score": 0.0},
+    "Bagging": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0, "F1_score": 0.0}
+}
 
 # Define the model dictionary for optimization
-models_dict = {
+models_dict_glove = {
     "LogisticRegression": {
         "model": LogisticRegression,"C_values": (0.01, 0.1, 1.0, 10.0),"penalty": (None, 'l2')},
     "RandomForest": {
         "model": RandomForestClassifier,"n_estimators": (100, 200, 500),"max_depth": (10, 20, None),"min_samples_split": (2, 5, 10)},
     "SVM": {
-        "model": SVC,"C_values": (0.1, 1, 10),"kernel": ('linear', 'rbf'),"gamma": ('scale', 'auto')}
-}
-
-# Define the results dictionary
-results_dict = {
-    "LogisticRegression": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0},
-    "RandomForest": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0},
-    "SVM": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0},
-    "Bagging": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0},
-    "AdaBoost": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0}
+        "model": SVC,"C_values": (0.1, 1, 10),"kernel": ('linear', 'rbf'),"gamma": ('scale', 'auto')},
+    "MLP": {
+        "model": MLPClassifier, "population_size": 5, "max_generations": 20, "layer_range": (50, 200), "activation": ("tanh", "logistic", "relu")}
 }
 
 # Initialize the ModelBuilding class with the training, testing and validation data
-builder = ModelBuilding(np.array(X_train), np.array(y_train), np.array(X_test), np.array(y_test),
-                        np.array(X_validation), np.array(y_validation))
+builder_glove = ModelBuilding(np.array(X_train_glove), np.array(y_train_glove), np.array(X_test_glove), np.array(y_test),
+                              np.array(X_validation_glove), np.array(y_validation_glove), 'glove')
+
+builder_bert = ModelBuilding(np.array(X_train_bert), np.array(y_train_bert), np.array(X_test_bert), np.array(y_test),
+                             np.array(X_validation_bert), np.array(y_validation_bert), 'bert')
 
 # Supervised Learning Algorithms
-#builder.build_models("LogisticRegression", models_dict, results_dict)
-#builder.build_models("RandomForest", models_dict, results_dict)
-builder.build_models("SVM", models_dict, results_dict)
+builder_glove.build_models("LogisticRegression", models_dict_glove, results_dict)
+builder_glove.build_models("RandomForest", models_dict_glove, results_dict)
+builder_glove.build_models("SVM", models_dict_glove, results_dict)
+builder_glove.build_models("MLP", models_dict_glove, results_dict)
+
+models_dict_bert = {
+    "LogisticRegression": {
+        "model": LogisticRegression,"C_values": (0.01, 0.1, 1.0, 10.0),"penalty": (None, 'l2')},
+    "RandomForest": {
+        "model": RandomForestClassifier,"n_estimators": (100, 200, 500),"max_depth": (10, 20, None),"min_samples_split": (2, 5, 10)},
+    "SVM": {
+        "model": SVC,"C_values": (0.1, 1, 10),"kernel": ('linear', 'rbf'),"gamma": ('scale', 'auto')},
+    "MLP": {
+        "model": MLPClassifier, "population_size": 5, "max_generations": 20, "layer_range": (50, 200), "activation": ("tanh", "logistic", "relu")}
+}
+
+builder_bert.build_models("LogisticRegression", models_dict_bert, results_dict)
+builder_bert.build_models("RandomForest", models_dict_bert, results_dict)
+builder_bert.build_models("SVM", models_dict_bert, results_dict)
+builder_bert.build_models("MLP", models_dict_bert, results_dict)
 
 # Serialize the builder object
-with open('builder.pkl', 'wb') as f:
-    pickle.dump(builder, f)
-
+with open('builder_glove.pkl', 'wb') as f:
+    pickle.dump(builder_glove, f)
 # Deserialize the builder object
-with open('builder.pkl', 'rb') as f:
-    builder = pickle.load(f)
+with open('builder_glove.pkl', 'rb') as f:
+    builder_glove = pickle.load(f)
+
+# Serialize the builder object
+with open('builder_bert.pkl', 'wb') as f:
+    pickle.dump(builder_bert, f)
+# Deserialize the builder object
+with open('builder_bert.pkl', 'rb') as f:
+    builder_bert = pickle.load(f)
 
 # Name of the best model
-best_model_name = None
+best_model_name_glove = None
+best_model_name_bert = None
 
 # Check the best model
-if builder.best_model_checked == LogisticRegression:
-    best_model_name = 'LogisticRegression'
-elif builder.best_model_checked == RandomForestClassifier:
-    best_model_name = 'RandomForest'
-elif builder.best_model_checked == SVC:
-    best_model_name = 'SVM'
+if builder_glove.best_model_checked == LogisticRegression:
+    best_model_name_glove = 'LogisticRegression'
+elif builder_glove.best_model_checked == RandomForestClassifier:
+    best_model_name_glove = 'RandomForest'
+elif builder_glove.best_model_checked == SVC:
+    best_model_name_glove = 'SVM'
+elif builder_glove.best_model_checked == MLPClassifier:
+    best_model_name_glove = 'MLP'
 
-print("\nBest model:", best_model_name)
-print("Best model parameters:", builder.best_model_params_checked)
+# Check the best model
+if builder_bert.best_model_checked == LogisticRegression:
+    best_model_name_bert = 'LogisticRegression'
+elif builder_bert.best_model_checked == RandomForestClassifier:
+    best_model_name_bert = 'RandomForest'
+elif builder_bert.best_model_checked == SVC:
+    best_model_name_bert = 'SVM'
+elif builder_bert.best_model_checked == MLPClassifier:
+    best_model_name_bert = 'MLP'
+
+print("\nBest model Glove:", best_model_name_glove)
+print("Best model Glove parameters:", builder_glove.best_model_params_checked)
+
+print("\nBest model Bert:", best_model_name_bert)
+print("Best model Bert parameters:", builder_bert.best_model_params_checked)
+
+# Comparação dos dois modelos
+if builder_glove.best_score > builder_bert.best_score:
+    builder = builder_glove
+    X_train = X_train_glove
+    y_train = y_train_glove
+    X_test = X_test_glove
+    label_encoder = label_encoders_X_glove
+
+    print("\nGlove embeddings model is better\n")
+else:
+    builder = builder_bert
+    X_train = X_train_bert
+    y_train = y_train_bert
+    X_test = X_test_bert
+    label_encoder = label_encoders_X_bert
+
+    print("\nBert embeddings model is better\n")
 
 # Initialize the BaggingClassifier class with the best model
 bagging = BaggingClassifier(builder.best_model_checked(**builder.best_model_params_checked), np.array(X_train),
@@ -859,3 +1307,8 @@ bagging = BaggingClassifier(builder.best_model_checked(**builder.best_model_para
 bagging.examine_bagging()
 # Evaluate the bagging ensemble on the test set
 bagging.evaluate(results_dict)
+
+# Assuming 'builder' contains the best model, PCA, and scaler
+tester = ModelTester(builder, label_encoder, test_data_preprocessed, 'data/predictions.csv')
+# Predict the target and save to CSV
+tester.predict()
