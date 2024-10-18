@@ -1,7 +1,6 @@
 import joblib
 import matplotlib.pyplot as plt
 import nltk
-from nltk import word_tokenize
 from nltk.corpus import stopwords
 import numpy as np
 import os
@@ -12,6 +11,7 @@ import random
 import re
 import spacy
 import textstat
+import torch
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split, KFold
@@ -40,8 +40,34 @@ nlp = spacy.load('en_core_web_sm')
 warnings.filterwarnings("ignore")
 
 class DataLoader:
+    """
+    A class to load data from a file and perform basic data validation.
+
+    Parameters:
+    filename (str): The path to the data file.
+    column_names (list): A list of column names for the dataset.
+    target (str): The target column of the dataset.
+
+    Attributes:
+    filename (str): The path to the data file.
+    column_names (list): A list of column names for the dataset.
+    target (str): The target of the dataset.
+    data (pd.DataFrame): The dataset loaded from the file.
+    labels (pd.Series): The target labels from the dataset.
+
+    Methods:
+    _load_data: Load the dataset from the file.
+    """
 
     def __init__(self, filename, column_names, target):
+        """
+        Initialize the DataLoader with the provided file path, column names, and target column.
+
+        Parameters:
+        filename (str): The path to the data file.
+        column_names (list): A list of column names for the dataset.
+        target (str): The target of the dataset.
+        """
 
         self.filename = filename
         self.target = target
@@ -52,6 +78,12 @@ class DataLoader:
         self._load_data(target)
 
     def _load_data(self, target):
+        """
+        Load the dataset from the file and validate the target column.
+
+        Parameters:
+        target (str): The target of the dataset.
+        """
 
         try:
             # Load the dataset
@@ -70,8 +102,34 @@ class DataLoader:
 
 
 class DataManipulator(DataLoader):
+    """
+    A class for manipulating data loaded from a file.
+
+    Parameters:
+        filename (str): The path to the data file.
+        target (str): The target variable in the data.
+
+    Attributes:
+        data (DataFrame): The loaded data.
+
+    Methods:
+        _describe_variables: Prints information about the data, including data info, unique values, and statistical distribution.
+
+    Raises:
+        FileNotFoundError: If the specified file is not found.
+    """
 
     def __init__(self, filename, column_names, target):
+        """
+        Initialize the class with a filename and target variable.
+
+        Parameters:
+            filename (str): The path to the file.
+            target (str): The name of the target variable.
+
+        Raises:
+            FileNotFoundError: If the file is not found.
+        """
 
         try:
             super().__init__(filename, column_names, target)
@@ -81,6 +139,9 @@ class DataManipulator(DataLoader):
             print("File not found. Please check the file path.")
 
     def _describe_variables(self):
+        """
+        Print information about the data, including data info, unique values, and statistical distribution.
+        """
 
         print("\nInformation of Data:")
         print(self.data.info())
@@ -93,14 +154,44 @@ class DataManipulator(DataLoader):
 
 
 class DataProcessing:
+    """
+    A class for cleaning and processing text data.
+
+    Parameters:
+    data_loader (DataLoader): A DataLoader object containing the loaded data.
+
+    Attributes:
+    data_loader (DataLoader): A DataLoader object containing the loaded data.
+    stop_words (set): A set of English stopwords.
+
+    Methods:
+    clean_text: Clean the text data by lowercasing, removing punctuation, and stopwords.
+    """
 
     def __init__(self, data_loader):
+        """
+        Initialize the DataProcessing object with a DataLoader object.
+
+        Parameters:
+        data_loader (DataLoader): A DataLoader object containing the loaded data.
+        """
+
         self.data_loader = data_loader
         self.stop_words = set(stopwords.words('english'))
 
         self._sanity_check()
 
     def _sanity_check(self):
+        """
+        Perform a sanity check to ensure that the DataLoader object is valid.
+
+        Returns:
+        bool: True if the DataLoader object is valid, False
+
+        Raises:
+        ValueError: If the DataLoader object is not provided or does not contain a pandas DataFrame.
+        """
+
         try:
             if not self.data_loader:
                 raise ValueError("DataLoader object is not provided.")
@@ -111,8 +202,21 @@ class DataProcessing:
             return False
 
     def clean_text(self, data = None):
+        """
+        Clean the text data by lowercasing, removing punctuation, and stopwords.
+
+        Parameters:
+        data (pd.DataFrame): A DataFrame containing text data to clean.
+
+        Returns:
+        pd.DataFrame: A DataFrame with cleaned text data.
+        """
 
         if data is None:
+
+            # Drop the 'title' column
+            data_loader.data.drop(columns=['title'], inplace=True)
+
             # Lowercase the text
             data_loader.data['plot'] = data_loader.data['plot'].str.lower()
             # Remove punctuation
@@ -121,6 +225,9 @@ class DataProcessing:
             data_loader.data['plot'] = data_loader.data['plot'].apply(
                 lambda x: ' '.join([word for word in x.split() if word not in self.stop_words]))
         else:
+
+            data.drop(columns=['title'], inplace=True)
+
             data['plot'] = data['plot'].str.lower()
             data['plot'] = data['plot'].apply(lambda x: re.sub(r'[^\w\s]', '', x))
             data['plot'] = data['plot'].apply(
@@ -129,16 +236,44 @@ class DataProcessing:
 
 
 class BERTEmbeddings:
-    #load pre-trained BERT model and tokenizer
+    """
+    BERT embeddings using the transformers library.
+
+    Parameters:
+    model_name (str): The name of the pre-trained BERT model to use.
+
+    Attributes:
+    tokenizer (BertTokenizer): The BERT tokenizer.
+    model (BertModel): The BERT model.
+
+    Methods:
+    get_embeddings: Get BERT embeddings for text data.
+    """
+
     def __init__(self, model_name='bert-base-uncased'):
+        """
+        Initialize the BERTEmbeddings object with a pre-trained BERT model.
+
+        Parameters:
+        model_name (str): The name of the pre-trained BERT model to use.
+        """
+
         self.tokenizer = BertTokenizer.from_pretrained(model_name)
         self.model = BertModel.from_pretrained(model_name)
 
     def get_embeddings(self, text):
-        #tokenize the text
+        """
+        Get BERT embeddings for text data.
+
+        Parameters:
+        text (str): The input text data.
+
+        Returns:
+        np.array: The BERT embeddings for the input text.
+        """
+
         inputs = self.tokenizer(text, return_tensors='pt', truncation=True, padding=True, max_length=512)
 
-        #get the embeddings
         with torch.no_grad():
             outputs = self.model(**inputs)
             plot_embeddings = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
@@ -146,8 +281,34 @@ class BERTEmbeddings:
 
 
 class Embeddings:
+    """
+    A class for creating dense vector representations for text data using pre-trained embeddings.
+
+    Parameters:
+    glove_file_path (str): The path to the GloVe embeddings file.
+
+    Attributes:
+    bert_embedder (BERTEmbeddings): A BERTEmbeddings object for BERT embeddings.
+    embeddings_index (dict): A dictionary of GloVe embeddings.
+
+    Methods:
+    _load_glove_embeddings: Load GloVe embeddings into a dictionary.
+    _glove_plot_to_embedding: Convert a plot of text into a dense vector representation using GloVe.
+    _bert_plot_to_embedding: Convert a plot of text into a dense vector representation using BERT.
+    _plot_to_embedding: Convert a plot to an embedding using the selected method (GloVe or BERT).
+    embedding_df: Create plot embeddings for X using the selected embedding method.
+    embedding_X: Create dense vector representations for both train and test data and return encoded X and y.
+    encode_target: Encode the target variable using LabelEncoder.
+    embedding_test: Create embeddings for the test data using the selected method.
+    """
 
     def __init__(self, glove_file_path=None):
+        """
+        Initialize the Embeddings object with pre-trained embeddings.
+
+        Parameters:
+        glove_file_path (str): The path to the GloVe embeddings file.
+        """
 
         self.bert_embedder = BERTEmbeddings()
 
@@ -158,7 +319,16 @@ class Embeddings:
             self.embeddings_index = None
 
     def _load_glove_embeddings(self, file_path):
-        """Load GloVe pre-trained embeddings into a dictionary."""
+        """
+        Load GloVe embeddings into a dictionary.
+
+        Parameters:
+        file_path (str): The path to the GloVe embeddings file.
+
+        Returns:
+        dict: A dictionary of GloVe embeddings.
+        """
+
         embeddings_index = {}
         with open(file_path, encoding='utf-8') as f:
             for line in f:
@@ -170,9 +340,17 @@ class Embeddings:
         return embeddings_index
 
     def _glove_plot_to_embedding(self, plot):
-        """Convert a plot of text into a dense vector representation using GloVe."""
+        """
+        Convert a plot of text into a dense vector representation using GloVe.
+
+        Parameters:
+        plot (str): The plot text to embed.
+
+        Returns:
+        np.array: The resulting embedding vector.
+        """
         words = plot.split()
-        embedding_dim = 100  # Adjust based on GloVe vector size
+        embedding_dim = 100
         plot_vector = np.zeros((embedding_dim,))
         word_count = 0
 
@@ -187,7 +365,15 @@ class Embeddings:
         return plot_vector
 
     def _bert_plot_to_embedding(self, plot):
-        """Convert a plot of text into a dense vector representation using BERT."""
+        """
+        Convert a plot of text into a dense vector representation using BERT.
+
+        Parameters:
+        plot (str): The plot text to embed.
+
+        Returns:
+        np.array: The resulting embedding vector.
+        """
         embedding = self.bert_embedder.get_embeddings(plot)  # Call the BERT embedding method
         return embedding
 
@@ -201,6 +387,9 @@ class Embeddings:
 
         Returns:
         np.array: The resulting embedding vector.
+
+        Raises:
+        ValueError: If an unknown embedding method is provided.
         """
         if method == "glove":
             return self._glove_plot_to_embedding(plot)
@@ -210,7 +399,16 @@ class Embeddings:
             raise ValueError(f"Unknown embedding method: {method}")
 
     def embedding_df(self, X, method="glove"):
-        """Create plot embeddings for X using the selected embedding method."""
+        """
+        Create plot embeddings for X using the selected embedding method.
+
+        Parameters:
+        X (pd.DataFrame): The input DataFrame with a 'plot' column.
+        method (str): The embedding method to use ("glove" or "bert").
+
+        Returns:
+        pd.DataFrame: A DataFrame with plot embeddings.
+        """
         X['plot_embedding'] = X['plot'].apply(lambda plot: self._plot_to_embedding(plot, method=method))
 
         # Stack the plot embeddings into a matrix
@@ -226,16 +424,21 @@ class Embeddings:
         Create dense vector representations for both train and test data and return encoded X and y.
 
         Parameters:
+        X_train_raw (pd.DataFrame): The raw training data.
+        X_test_raw (pd.DataFrame): The raw test data.
         method (str): The embedding method to use ("glove" or "bert").
+
+        Returns:
+        tuple: A tuple containing the processed training and test data, the StandardScaler object, and the label encoders.
         """
 
-        # ----- Processing X_train_augmented -----
+        # ----- Processing X_train_raw -----
         plot_embeddings_train_df = self.embedding_df(X_train_raw, method=method)
 
         X_train_raw.reset_index(drop=True, inplace=True)
         plot_embeddings_train_df.reset_index(drop=True, inplace=True)
 
-        X_train_processed = pd.concat([X_train_raw.drop(columns=['plot', 'title', 'plot_embedding']),
+        X_train_processed = pd.concat([X_train_raw.drop(columns=['plot', 'plot_embedding']),
                                        plot_embeddings_train_df], axis=1)
 
         # Initialize label encoders dictionary
@@ -253,7 +456,7 @@ class Embeddings:
         X_test_raw.reset_index(drop=True, inplace=True)
         plot_embeddings_test_df.reset_index(drop=True, inplace=True)
 
-        X_test_processed = pd.concat([X_test_raw.drop(columns=['plot', 'title', 'plot_embedding']),
+        X_test_processed = pd.concat([X_test_raw.drop(columns=['plot', 'plot_embedding']),
                                       plot_embeddings_test_df], axis=1)
 
         # Encode 'language' and 'director' in test set, handling unseen labels
@@ -272,26 +475,48 @@ class Embeddings:
         return X_train_scaled, X_test_scaled, scaler, label_encoders_X
 
     def encode_target(self, y_train_raw, y_test_raw, ):
+        """
+        Encode the target variable using LabelEncoder.
+
+        Parameters:
+        y_train_raw (pd.Series): The raw training labels.
+        y_test_raw (pd.Series): The raw test labels.
+
+        Returns:
+        tuple: A tuple containing the encoded training and test labels and the LabelEncoder object.
+        """
 
         le = LabelEncoder()
         y_train_encoded = le.fit_transform(y_train_raw)
         y_test_encoded = le.fit_transform(y_test_raw)
 
-        return y_train_encoded, y_test_encoded
+        return y_train_encoded, y_test_encoded, le
 
-    def embedding_test(self, test_data, scaler, label_encoders_X, method="glove"):
+    def embedding_test(self, test_data, scaler, label_encoders, method="glove"):
+        """
+        Create embeddings for the test data using the selected method.
+
+        Parameters:
+        test_data (pd.DataFrame): The test data with a 'plot' column.
+        scaler (StandardScaler): The StandardScaler object fitted on the training data.
+        label_encoders (dict): A dictionary of LabelEncoders for 'language' and 'director'.
+        method (str): The embedding method to use ("glove" or "bert").
+
+        Returns:
+        np.array: The processed test data with embeddings.
+        """
 
         plot_embeddings_test_data_df = self.embedding_df(test_data, method=method)
 
         test_data.reset_index(drop=True, inplace=True)
         plot_embeddings_test_data_df.reset_index(drop=True, inplace=True)
 
-        test_data_processed = pd.concat([test_data.drop(columns=['plot', 'title', 'plot_embedding']),
+        test_data_processed = pd.concat([test_data.drop(columns=['plot', 'plot_embedding']),
                                        plot_embeddings_test_data_df], axis=1)
 
         for col in ['language', 'director']:
             test_data_processed[col] = test_data_processed[col].apply(
-                lambda x: label_encoders_X[col].transform([x])[0] if x in label_encoders_X[col].classes_ else -1
+                lambda x: label_encoders[col].transform([x])[0] if x in label_encoders[col].classes_ else -1
             )
 
         test_data_scaled = scaler.transform(test_data_processed)
@@ -301,14 +526,45 @@ class Embeddings:
 
 
 class DataVisualization:
+    """
+    A class for creating visualizations of the data.
+
+    Parameters:
+    data_loader (DataLoader): A DataLoader object containing the loaded data.
+    valid_plot_types (list): A list of valid plot types to create.
+
+    Attributes:
+    data_loader (DataLoader): A DataLoader object containing the loaded data.
+    valid_plot_types (list): A list of valid plot types to create.
+    labels (list): A list of unique labels in the target column.
+
+    Methods:
+    plots: Create visualizations of the data based on the selected plot types.
+    """
 
     def __init__(self, data_loader, valid_plot_types):
+        """
+        Initialize the DataVisualization object with a DataLoader object and valid plot types.
+
+        Parameters:
+        data_loader (DataLoader): A DataLoader object containing the loaded data.
+        valid_plot_types (list): A list of valid plot types to create.
+        """
 
         self.data_loader = data_loader
         self.valid_plot_types = valid_plot_types
         self.labels = self.data_loader.data[self.data_loader.target].unique().tolist()
 
     def plots(self, plot_types):
+        """
+        Create visualizations of the data based on the selected plot types.
+
+        Parameters:
+        plot_types (list): A list of plot types to create.
+
+        Raises:
+        ValueError: If an invalid plot type is provided.
+        """
 
         for plot_type in plot_types:
             # Check if the selected plots are in the list of available plots
@@ -382,10 +638,30 @@ class DataVisualization:
 
 
 class FeatureCreation:
+    """
+    A class for creating additional features from the text data.
+
+    Methods:
+    create_features: Create new features from the text data.
+    _average_word_length: Calculate the average word length in the plot.
+    _unique_word_count: Count the number of unique words in the plot.
+    _pos_tag_ratios: Calculate the ratio of nouns, verbs, and adjectives in the plot.
+    _entity_count: Count the number of named entities in the plot.
+    _flesch_kincaid_score: Calculate the Flesch-Kincaid readability score.
+    _lda_topic_features: Generate LDA topic features.
+    """
+
     def __init__(self):
         pass
 
     def create_features(self, data):
+        """
+        Create new features from the text data.
+
+        Parameters:
+        data (pd.DataFrame): The input data with a 'plot' column.
+        """
+
         # Existing features
         data['plot_length'] = data['plot'].apply(lambda x: len(str(x).split()))
         print("Created plot_length feature\n")
@@ -423,19 +699,43 @@ class FeatureCreation:
         print("Created LDA topic features\n")
 
     def _average_word_length(self, text):
-        """Calculate average word length in the plot."""
+        """
+        Calculate average word length in the plot.
+
+        Parameters:
+        text (str): The input text data.
+
+        Returns:
+        float: The average word length
+        """
         words = str(text).split()
         if len(words) == 0:
             return 0
         return sum(len(word) for word in words) / len(words)
 
     def _unique_word_count(self, text):
-        """Count the number of unique words in the plot."""
+        """
+        Count the number of unique words in the plot.
+
+        Parameters:
+        text (str): The input text data.
+
+        Returns:
+        int: The number of unique words
+        """
         words = str(text).split()
         return len(set(words))
 
     def _pos_tag_ratios(self, text):
-        """Calculate the ratio of nouns, verbs, and adjectives in the plot."""
+        """
+        Calculate the ratio of nouns, verbs, and adjectives in the plot.
+
+        Parameters:
+        text (str): The input text data.
+
+        Returns:
+        tuple: The ratio of nouns, verbs, and adjectives
+        """
         doc = nlp(text)
         total_tokens = len(doc)
         noun_count = sum(1 for token in doc if token.pos_ == 'NOUN')
@@ -445,16 +745,40 @@ class FeatureCreation:
         return noun_count / total_tokens, verb_count / total_tokens, adj_count / total_tokens
 
     def _entity_count(self, text):
-        """Count the number of named entities in the plot."""
+        """
+        Count the number of named entities in the plot.
+
+        Parameters:
+        text (str): The input text data.
+
+        Returns:
+        int: The number of named entities
+        """
         doc = nlp(text)
         return len(doc.ents)
 
     def _flesch_kincaid_score(self, text):
-        """Calculate the Flesch-Kincaid readability score."""
+        """
+        Calculate the Flesch-Kincaid readability score.
+
+        Parameters:
+        text (str): The input text data.
+
+        Returns:
+        float: The Flesch-Kincaid readability score.
+        """
         return textstat.flesch_kincaid_grade(text)
 
     def _lda_topic_features(self, plots):
-        """Generate LDA topic features."""
+        """
+        Generate LDA topic features.
+
+        Parameters:
+        plots (pd.Series): A series of plots.
+
+        Returns:
+        tuple: The LDA topic features.
+        """
         vectorizer = TfidfVectorizer(max_features=500)
         X = vectorizer.fit_transform(plots)
 
@@ -464,143 +788,39 @@ class FeatureCreation:
         return lda_topics[:, 0], lda_topics[:, 1]
 
 
-class FeatureEvaluator:
-    def __init__(self, X_train, y_train, model=None):
-        """
-        Initialize the FeatureEvaluator with training data and a model.
-
-        Parameters:
-        X_train (DataFrame or numpy array): The training features.
-        y_train (DataFrame or numpy array): The target variable.
-        model (sklearn model): A machine learning model. Default is RandomForestClassifier.
-        """
-        self.X_train = X_train
-        self.y_train = y_train
-        self.model = model if model is not None else RandomForestClassifier(n_estimators=100, random_state=42)
-
-        # Check if X_train is a DataFrame to extract feature names
-        if isinstance(X_train, pd.DataFrame):
-            self.feature_names = X_train.columns
-        else:
-            self.feature_names = [f"Feature {i}" for i in range(X_train.shape[1])]
-
-    def evaluate_importance(self):
-        """
-        Train the model and calculate feature importance.
-        """
-        # Fit the model
-        self.model.fit(self.X_train, self.y_train)
-
-        # Get feature importances
-        self.importances = self.model.feature_importances_
-        self.indices = np.argsort(self.importances)[::-1]  # Sort in descending order
-
-        # Get feature names
-        if isinstance(self.X_train, pd.DataFrame):
-            feature_names = self.X_train.columns
-        else:
-            feature_names = [f"Feature {i}" for i in range(self.X_train.shape[1])]
-
-        # Print the ranking of features with names
-        print("Feature ranking:")
-        for i in range(self.X_train.shape[1]):
-            print(f"{i + 1}. {feature_names[self.indices[i]]} ({self.importances[self.indices[i]]})")
-
-        return self.importances
-
-    def plot_importance(self):
-        """
-        Plot the feature importance.
-        """
-        # Plot the feature importances
-        plt.figure(figsize=(10, 6))
-        plt.title("Feature Importances")
-        plt.bar(range(self.X_train.shape[1]), self.importances[self.indices], align="center")
-        plt.xticks(range(self.X_train.shape[1]), [self.feature_names[i] for i in self.indices], rotation=90)
-        plt.xlabel("Feature")
-        plt.ylabel("Importance")
-        plt.xlim([-1, self.X_train.shape[1]])
-        plt.tight_layout()
-        plt.show()
-
-    def get_top_features(self, n=10):
-        """
-        Get the top N features based on importance.
-
-        Parameters:
-        n (int): Number of top features to return.
-
-        Returns:
-        list: Names of the top N features.
-        """
-        top_indices = self.indices[:n]
-        top_features = [self.feature_names[i] for i in top_indices]
-        return top_features
-
-
-class DataAugmentation:
-
-    def __init__(self):
-        pass
-
-    def random_insertion(self, text, n_insertions=3):
-        """Randomly insert adjectives or relevant genre words into the plot."""
-        words = word_tokenize(text)
-        insertions = ["dark", "mysterious", "frightening", "intense", "haunting", "thrilling"]
-
-        for _ in range(n_insertions):
-            insert_word = random.choice(insertions)
-            insert_position = random.randint(0, len(words))
-            words.insert(insert_position, insert_word)
-
-        new_text = ' '.join(words)
-        return new_text
-
-    def random_deletion(self, text, p=0.2):
-        """Randomly delete words from the plot with probability p."""
-        words = word_tokenize(text)
-        new_words = [word for word in words if random.uniform(0, 1) > p]
-
-        new_text = ' '.join(new_words)
-        return new_text
-
-    def augment_data(self, data, n_augmentations=2):
-        original_row_count = len(data)
-        new_rows = []
-
-        # Iterate over each row in the dataset
-        for _, row in data.iterrows():
-            original_row = row.to_dict()  # Convert the row to a dictionary
-
-            # Generate n_augmentations new rows with modified plots
-            for _ in range(n_augmentations):
-                new_row = original_row.copy()  # Keep other columns the same
-
-                # Apply random insertion or random deletion
-                if random.random() > 0.5:
-                    new_row['plot'] = self.random_insertion(row['plot'])
-                else:
-                    new_row['plot'] = self.random_deletion(row['plot'])
-
-                new_rows.append(new_row)
-
-        # Create a DataFrame from the new rows and append to the original data
-        augmented_df = pd.DataFrame(new_rows)
-        augmented_data = pd.concat([data, augmented_df], ignore_index=True)
-
-        # Insights into the augmentation process
-        augmented_row_count = len(augmented_df)
-        total_row_count = len(augmented_data)
-        print(f"Original rows: {original_row_count}")
-        print(f"Augmented rows: {augmented_row_count}")
-        print(f"Total rows after augmentation: {total_row_count}")
-
-        return augmented_data
-
-
 class ModelOptimization:
+    """
+    A class for optimizing hyperparameters of machine learning models.
+
+    Parameters:
+    X_train (np.array): The training features.
+    y_train (np.array): The training labels.
+    X_val (np.array): The validation features.
+    y_val (np.array): The validation labels.
+
+    Attributes:
+    X_train (np.array): The training features.
+    y_train (np.array): The training labels.
+    X_val (np.array): The validation features.
+    y_val (np.array): The validation labels.
+
+    Methods:
+    optimize_logistic_regression: Optimize hyperparameters for Logistic Regression.
+    optimize_random_forest: Optimize hyperparameters for Random Forest.
+    optimize_svm: Optimize hyperparameters for Support Vector Machine.
+    optimize_mlp: Optimize hyperparameters for Multi-layer Perceptron.
+    """
 
     def __init__(self, X_train, y_train, X_val, y_val):
+        """
+        Initialize the ModelOptimization object with training and validation data.
+
+        Parameters:
+        X_train (np.array): The training features.
+        y_train (np.array): The training labels.
+        X_val (np.array): The validation features.
+        y_val (np.array): The validation labels.
+        """
 
         self.X_train = X_train
         self.y_train = y_train
@@ -608,6 +828,16 @@ class ModelOptimization:
         self.y_val = y_val
 
     def optimize_logistic_regression(self, C_values=(0.01, 0.1, 1.0, 10.0), penalty=(None, 'l2')):
+        """
+        Optimizes the parameters for Logistic Regression classifier.
+
+        Parameters:
+        C_values (tuple): Values to try for the regularization parameter C. Default is (0.01, 0.1, 1.0, 10.0).
+        penalty (tuple): Penalty types to try. Default is (None, 'l2').
+
+        Returns:
+        tuple: Best parameters for Logistic Regression (C, penalty
+        """
 
         best_accuracy = -1
         best_c = None
@@ -636,12 +866,12 @@ class ModelOptimization:
         Optimizes the parameters for Random Forest classifier.
 
         Parameters:
-            n_estimators (tuple): Values to try for number of trees. Default is (100, 200).
-            max_depth (tuple): Values to try for maximum depth. Default is (None, 10, 20).
-            min_samples_split (tuple): Values to try for minimum samples required to split an internal node. Default is (2, 5).
+        n_estimators (tuple): Values to try for number of trees. Default is (100, 200).
+        max_depth (tuple): Values to try for maximum depth. Default is (None, 10, 20).
+        min_samples_split (tuple): Values to try for minimum samples required to split an internal node. Default is (2, 5).
 
         Returns:
-            dict: Best parameters for Random Forest (n_estimators, max_depth, min_samples_split).
+        tuple: Best parameters for Random Forest (n_estimators, max_depth, min_samples_split).
         """
         best_accuracy = -1
         best_params = None
@@ -670,12 +900,12 @@ class ModelOptimization:
         Optimizes the parameters for SVM classifier.
 
         Parameters:
-            C_values (tuple): Values to try for regularization parameter C. Default is (0.1, 1, 10).
-            kernel (tuple): Kernel types to try. Default is ('linear', 'rbf').
-            gamma (tuple): Gamma values to try for the RBF kernel. Default is ('scale', 'auto').
+        C_values (tuple): Values to try for regularization parameter C. Default is (0.1, 1, 10).
+        kernel (tuple): Kernel types to try. Default is ('linear', 'rbf').
+        gamma (tuple): Gamma values to try for the RBF kernel. Default is ('scale', 'auto').
 
         Returns:
-            tuple: Best parameters for SVM (C, kernel, gamma).
+        tuple: Best parameters for SVM (C, kernel, gamma).
         """
         best_accuracy = -1
         best_params = None
@@ -703,13 +933,13 @@ class ModelOptimization:
         Optimizes the parameters for Multi-layer Perceptron (MLP) classifier.
 
         Parameters:
-            population_size (int): Size of the population for optimization. Default is 20.
-            max_generations (int): Maximum number of generations for optimization. Default is 50.
-            layer_range (tuple): Range of neurons in hidden layers. Default is (1, 100).
-            activation (tuple): Activation functions to try. Default is ('logistic', 'tanh').
+        population_size (int): Size of the population for optimization. Default is 20.
+        max_generations (int): Maximum number of generations for optimization. Default is 50.
+        layer_range (tuple): Range of neurons in hidden layers. Default is (1, 100).
+        activation (tuple): Activation functions to try. Default is ('logistic', 'tanh').
 
         Returns:
-            tuple: Best parameters for MLP (number of neurons, activation function), best model, and best accuracy.
+        tuple: Best parameters for MLP (number of neurons, activation function), best model, and best accuracy.
         """
         # Initialize the population
         population = []
@@ -772,8 +1002,33 @@ class ModelOptimization:
 
 
 class CrossValidator:
+    """
+    A class for performing cross-validation and evaluating machine learning models.
+
+    Parameters:
+    k (int): The number of folds for cross-validation.
+
+    Attributes:
+    k (int): The number of folds for cross-validation.
+    kf (KFold): The KFold object for splitting the data.
+    cm (ConfusionMatrix): The ConfusionMatrix object for calculating evaluation metrics.
+    accuracy_scores (list): A list to store accuracy scores.
+    sensitivity_scores (list): A list to store sensitivity scores.
+    specificity_scores (list): A list to store specificity scores.
+    f1_scores (list): A list to store F1-scores.
+
+    Methods:
+    cross_validate: Perform cross-validation on the model.
+    evaluate_on_test_set: Evaluate the model on the test set.
+    """
 
     def __init__(self, k=5):
+        """
+        Initialize the CrossValidator object with the number of folds for cross-validation.
+
+        Parameters:
+        k (int): The number of folds for cross-validation
+        """
 
         self.k = k
         self.kf = KFold(n_splits=k, shuffle=True)
@@ -783,6 +1038,17 @@ class CrossValidator:
         self.specificity_scores = []
         self.f1_scores = []  # Add a list to store F1-scores
     def cross_validate(self, model, X, y):
+        """
+        Perform cross-validation on the model.
+
+        Parameters:
+        model: The machine learning model to evaluate.
+        X (np.array): The input features.
+        y (np.array): The target labels.
+
+        Returns:
+        tuple: The average accuracy, sensitivity, specificity, and F1-score.
+        """
 
         for train_index, val_index in self.kf.split(X):  # Split the data into training and validation sets
             X_train, X_val = X[train_index], X[val_index]
@@ -806,6 +1072,17 @@ class CrossValidator:
         return avg_accuracy, avg_sensitivity, avg_specificity, avg_f1_score
 
     def evaluate_on_test_set(self, model, X_test, y_test):
+        """
+        Evaluate the model on the test set.
+
+        Parameters:
+        model: The machine learning model to evaluate.
+        X_test (np.array): The test features.
+        y_test (np.array): The test labels.
+
+        Returns:
+        tuple: The accuracy, sensitivity, specificity, and F1-score on the test set.
+        """
 
         y_pred = model.predict(X_test)
         cm = ConfusionMatrix(actual_vector=list(y_test), predict_vector=list(y_pred))
@@ -817,8 +1094,56 @@ class CrossValidator:
 
 
 class ModelBuilding:
+    """
+    A class for building, optimizing, and evaluating machine learning models.
 
-    def __init__(self, X_train, y_train, X_test, y_test, X_val, y_val, encoder, k=5, save_all=True):
+    Parameters:
+    X_train (np.array): The training features.
+    y_train (np.array): The training labels.
+    X_test (np.array): The test features.
+    y_test (np.array): The test labels.
+    X_val (np.array): The validation features.
+    y_val (np.array): The validation labels.
+    encoder (LabelEncoder): The LabelEncoder object for the target variable.
+    k (int): The number of folds for cross-validation.
+    save_all (bool): A flag to save all models.
+
+    Attributes:
+    X_train (np.array): The training features.
+    y_train (np.array): The training labels.
+    X_test (np.array): The test features.
+    y_test (np.array): The test labels.
+    X_val (np.array): The validation features.
+    y_val (np.array): The validation labels.
+    encoder (LabelEncoder): The LabelEncoder object for the target variable.
+    k (int): The number of folds for cross-validation.
+    save_all (bool): A flag to save all models.
+    best_model: The best model found during optimization.
+    best_model_name: The name of the best model.
+    best_params: The best parameters for the best model.
+    best_score: The best validation score.
+    best_model_changed: A flag to indicate if the best model changed.
+    history (dict): A dictionary to store the validation scores of all models.
+
+    Methods:
+    build_models: Build, optimize, and evaluate machine learning models.
+    """
+
+    def __init__(self, X_train, y_train, X_test, y_test, X_val, y_val, encoder, k=5, save_all=False):
+        """
+        Initialize the ModelBuilding object with training, test, and validation data.
+
+        Parameters:
+        X_train (np.array): The training features.
+        y_train (np.array): The training labels.
+        X_test (np.array): The test features.
+        y_test (np.array): The test labels.
+        X_val (np.array): The validation features.
+        y_val (np.array): The validation labels.
+        encoder (LabelEncoder): The LabelEncoder object for the target variable.
+        k (int): The number of folds for cross-validation.
+        save_all (bool): A flag to save all models.
+        """
 
         self.X_train = X_train
         self.y_train = y_train
@@ -833,7 +1158,6 @@ class ModelBuilding:
         self.best_model_name = None
         self.best_params = None
         self.best_score = -1
-        #self.best_test_score = -1
         self.best_model_changed = False
         self.history = {}
 
@@ -876,10 +1200,10 @@ class ModelBuilding:
                 model_params_check['gamma'] = svm_params[2]
                 params = svm_params
             elif model_name == "MLP":  # Optimize the parameters for MLP
-                mlp_params = model_optimization.optimize_mlp(**model_params)
+                mlp_params, mlp_model = model_optimization.optimize_mlp(**model_params)
                 model_params_check['hidden_layer_sizes'] = (mlp_params[0],)
                 model_params_check['activation'] = mlp_params[1]
-                params, mlp_model = mlp_params
+                params= mlp_params
             else:
                 raise ValueError("Model type is not supported.")
 
@@ -972,8 +1296,54 @@ class ModelBuilding:
 
 
 class BaggingClassifier:
+    """
+    A class for implementing the Bagging ensemble method.
+
+    Parameters:
+    base_model: The base machine learning model.
+    X_train (np.array): The training features.
+    y_train (np.array): The training labels.
+    X_test (np.array): The test features.
+    y_test (np.array): The test labels.
+    n_straps (int): The number of bootstrap samples.
+    k_fold (int): The number of folds for cross-validation.
+
+    Attributes:
+    base_model: The base machine learning model.
+    n_straps (int): The number of bootstrap samples.
+    k_fold (int): The number of folds for cross-validation.
+    models (list): A list to store the models.
+    X_train (np.array): The training features.
+    y_train (np.array): The training labels.
+    X_test (np.array): The test features.
+    y_test (np.array): The test labels.
+    accuracy_scores (list): A list to store accuracy scores.
+    sensitivity_scores (list): A list to store sensitivity scores.
+    specificity_scores (list): A list to store specificity scores.
+    avg_accuracy (float): The average accuracy score.
+    avg_sensitivity (float): The average sensitivity score.
+    avg_specificity (float): The average specificity score.
+
+    Methods:
+    examine_bagging: Perform cross-validation on the Bagging ensemble.
+    predict: Make predictions using the Bagging ensemble.
+    evaluate: Evaluate the Bagging ensemble on the test set.
+    predict_and_save: Predict the genre from external data and save the results.
+    """
 
     def __init__(self, base_model, X_train, y_train, X_test, y_test, n_straps=100, k_fold=5):
+        """
+        Initialize the BaggingClassifier object with the base model, training, and test data.
+
+        Parameters:
+        base_model: The base machine learning model.
+        X_train (np.array): The training features.
+        y_train (np.array): The training labels.
+        X_test (np.array): The test features.
+        y_test (np.array): The test labels.
+        n_straps (int): The number of bootstrap samples.
+        k_fold (int): The number of folds for cross-validation.
+        """
 
         self.base_model = base_model
         self.n_straps = n_straps
@@ -990,27 +1360,27 @@ class BaggingClassifier:
         self.avg_specificity = None
 
     def examine_bagging(self):
+        """
+        Perform cross-validation on the Bagging ensemble.
+
+        Returns:
+        tuple: The average accuracy, sensitivity, and specificity scores.
+        """
 
         kfold = KFold(n_splits=self.k_fold, shuffle=True)
         for train_index, val_index in kfold.split(self.X_train):
-            # Generate n_straps samples and train the models for the current fold
             self.models = []
             for _ in range(self.n_straps):
-                # Create bootstrap sample with the available indices of the fold
                 bootstrap_indices = np.random.choice(train_index, size=len(self.X_train[train_index]), replace=True)
                 X_bootstrap = self.X_train[bootstrap_indices]
                 y_bootstrap = self.y_train[bootstrap_indices]
-
-                # Train base model on bootstrap sample
                 model = clone(self.base_model)
                 model.fit(X_bootstrap, y_bootstrap)
                 self.models.append(model)
 
             y_pred = self.predict(self.X_train[val_index])
-
             self.cm = ConfusionMatrix(actual_vector=list(self.y_train[val_index]), predict_vector=list(y_pred))
             self.accuracy_scores.append(accuracy_score(self.y_train[val_index], y_pred))
-            print(self.cm)
             self.sensitivity_scores.append(float(self.cm.TPR_Macro))
             self.specificity_scores.append(float(self.cm.TNR_Macro))
 
@@ -1021,20 +1391,36 @@ class BaggingClassifier:
         return self.avg_accuracy, self.avg_sensitivity, self.avg_specificity
 
     def predict(self, X):
+        """
+        Make predictions using the Bagging ensemble.
 
-        # Aggregate predictions from all models
+        Parameters:
+        X (np.array): The input features.
+
+        Returns:
+        np.array: The predicted labels.
+        """
+
         predictions = np.zeros((len(X), self.n_straps))
         for i, model in enumerate(self.models):
             predictions[:, i] = model.predict(X)
-
-        # Use majority voting to determine final prediction
         final_predictions = np.apply_along_axis(lambda x: np.bincount(x.astype(int)).argmax(), axis=1, arr=predictions)
         return final_predictions
 
     def evaluate(self, results_dict):
+        """
+        Evaluate the Bagging ensemble on the test set.
+
+        Parameters:
+        results_dict (dict): A dictionary to store the results.
+        """
 
         self.y_pred = self.predict(self.X_test)
         self.cm = ConfusionMatrix(actual_vector=list(self.y_test), predict_vector=list(self.y_pred))
+
+        # Print detailed confusion matrix statistics
+        print(self.cm)
+
         self.accuracy_scores = accuracy_score(self.y_test, self.y_pred)
         self.sensitivity_scores = float(self.cm.TPR_Macro)
         self.specificity_scores = float(self.cm.TNR_Macro)
@@ -1048,34 +1434,39 @@ class BaggingClassifier:
         print(f"Accuracy: {self.accuracy_scores}, Sensitivity: {self.sensitivity_scores}, "
               f"Specificity: {self.specificity_scores}, F1-score: {self.f1_score_value}")
 
-
-class ModelTester:
-    def __init__(self, builder, label_encoder, test_data_encoded, output_csv):
+    def predict_and_save(self, test_data_unencoded, test_data_encoded, output_csv, output_txt, label_encoder):
         """
-        Initialize with the best model, PCA, scaler, and preprocessing configurations.
+        Predict the genre from test_data_encoded, concatenate the predictions to external_data, and save the result to .csv and .txt files.
+
+        Parameters:
+        - test_data_unencoded (DataFrame): The new dataset (without predictions).
+        - test_data_encoded (DataFrame): The encoded test data used for predictions.
+        - output_csv (str): Path to save the predictions and external data as a .csv file.
+        - output_txt (str): Path to save the predictions and external data as a .txt file.
+        - label_encoder (LabelEncoder): The label encoder used for encoding genres.
         """
-        self.best_model = builder.best_model
-        self.label_encoder = label_encoder
-        self.test_data_encoded = test_data_encoded
-        self.output_csv = output_csv
+        # Make predictions using the bagging ensemble on the encoded test data
+        predictions = self.predict(test_data_encoded)
+        predicted_genres = label_encoder.inverse_transform(predictions)
 
-    def predict(self):
+        # Add the predicted genres as a new column in the external data
+        test_data_unencoded['predicted_genre'] = predicted_genres
 
-        # Make predictions
-        predictions = self.best_model.predict(self.test_data_encoded)
+        # Save the full data with predictions to a .csv file
+        test_data_unencoded.to_csv(output_csv, index=False)
+        print(f"External data with predictions saved to {output_csv}")
 
-        # Decode predicted genre numbers back to genre names
-        predicted_genres = self.label_encoder.inverse_transform(predictions)
+        # Save the predictions to a .txt file
+        with open(output_txt, 'w') as f:
+            for i, genre in enumerate(predicted_genres):
+                f.write(f"{i + 1}. {genre}\n")
 
-        # Add predictions to the original data
-        self.test_data_encoded['predicted_genre'] = predicted_genres
+        print(f"Predictions saved to {output_txt}")
 
-        # Save to CSV
-        self.test_data_encoded.to_csv(self.output_csv, index=False)
-        print(f"Predictions saved to {self.output_csv}")
 
 # %% 1- Pre Processing and EDA
 
+# Set the file path, column names and GloVe file path
 filename = 'data/train.txt'
 column_names = ['title', 'language', 'genre', 'director', 'plot']
 glove_file_path = 'Glove/glove.6B.100d.txt'
@@ -1083,104 +1474,64 @@ glove_file_path = 'Glove/glove.6B.100d.txt'
 # Load the data
 data_loader = DataManipulator(filename, column_names ,'genre')
 
+# Load the test data with no labels
 test_no_labels_filename = 'data/test_no_labels.txt'
 test_no_labels_column_names = ['title', 'language', 'director', 'plot']
 test_no_labels_data = pd.read_csv(test_no_labels_filename, sep='\t', names=test_no_labels_column_names)
 
-# Preprocess the data
+# Preprocess the data and the test data with no labels
 data_processing = DataProcessing(data_loader)
 data_processing.clean_text()
 test_data_preprocessed = data_processing.clean_text(test_no_labels_data)
 
+# Save the preprocessed data
 data_loader.data.to_csv('data/movie_data_preprocessed.csv', index=False)
 test_data_preprocessed.to_csv('data/movie_data_no_labels_preprocessed.csv', index=False)
 
 # Visualize the data
-#data_visualization = DataVisualization(data_loader, ['pie', 'bar', 'hist', 'wordcloud'])
-#data_visualization.plots(['pie', 'bar', 'hist', 'wordcloud'])
+data_visualization = DataVisualization(data_loader, ['pie', 'bar', 'hist', 'wordcloud'])
+data_visualization.plots(['pie', 'bar', 'hist', 'wordcloud'])
 
 # %% 2- Feature Creation
 
 # Initialize the FeatureCreation class with the data
 feature_creator = FeatureCreation()
-# Create features
+# Create features for the data and the test data with no labels
 print("\nFeatures Created:\n")
 feature_creator.create_features(data_loader.data)
 feature_creator.create_features(test_data_preprocessed)
 
-# Implement some kind of data visualization
-
+# Save the data with features
 data_loader.data.to_csv('data/movie_data_featurecreation.csv', index=False)
 test_data_preprocessed.to_csv('data/movie_data_no_labels_featurecreation.csv', index=False)
 
 # %% 3- Data Splitting
 
+# Load the preprocessed data
 X_raw = data_loader.data.drop(columns=[data_loader.target])
 y_raw = data_loader.data[data_loader.target]
 
+# Split the data into training and test sets
 X_train_raw, X_test_raw, y_train_raw, y_test_raw = train_test_split(X_raw, y_raw, test_size=0.2, random_state=42)
 
 # %% 4- Embeddings and Data Splitting
 
+# Initialize the Embeddings class
 data_embeddings = Embeddings(glove_file_path)
+# Embed the data and split it into training, validation, and test sets with GloVe and BERT embeddings
 X_train_glove, X_test_glove, scaler_glove, label_encoders_X_glove = data_embeddings.embedding_X(X_train_raw,X_test_raw, 'glove')
 X_train_bert, X_test_bert, scaler_bert, label_encoders_X_bert = data_embeddings.embedding_X(X_train_raw,X_test_raw, 'bert')
 
-y_train, y_test = data_embeddings.encode_target(y_train_raw, y_test_raw)
+# Encode the target variable
+y_train, y_test, label_encoder_target = data_embeddings.encode_target(y_train_raw, y_test_raw)
 
+# Embed the test data with no labels with GloVe and BERT embeddings
 y_test_no_labels_glove = data_embeddings.embedding_test(test_data_preprocessed, scaler_glove, label_encoders_X_glove, 'glove')
 y_test_no_labels_bert = data_embeddings.embedding_test(test_data_preprocessed, scaler_bert, label_encoders_X_bert, 'bert')
 
+# Split the training data into training and validation sets of the GloVe and BERT embeddings
 X_train_glove, X_validation_glove, y_train_glove, y_validation_glove = train_test_split(X_train_glove, y_train, test_size=0.2, random_state=42)
 X_train_bert, X_validation_bert, y_train_bert, y_validation_bert = train_test_split(X_train_bert, y_train, test_size=0.2, random_state=42)
-
-
-np.save('data/vectors/X_train_glove', X_train_glove)
-np.save('data/vectors/X_test_glove', X_test_glove)
-np.save('data/vectors/X_validation_glove', X_validation_glove)
-np.save('data/vectors/y_train_glove', y_train_glove)
-np.save('data/vectors/y_test_glove', y_test)
-np.save('data/vectors/y_validation_glove', y_validation_glove)
-
-np.save('data/vectors/X_train_bert', X_train_bert)
-np.save('data/vectors/X_test_bert', X_test_bert)
-np.save('data/vectors/X_validation_bert', X_validation_bert)
-np.save('data/vectors/y_train_bert', y_train_bert)
-np.save('data/vectors/y_validation_bert', y_validation_bert)
-
-np.save('data/vectors/y_test_no_labels_glove', y_test_no_labels_glove)
-np.save('data/vectors/y_test_no_labels_bert', y_test_no_labels_bert)
-
-# Save dictionarie label_encoders_X_glove and label_encoders_X_bert
-joblib.dump(label_encoders_X_glove, 'data/vectors/label_encoders_X_glove.pkl')
-joblib.dump(label_encoders_X_bert, 'data/vectors/label_encoders_X_bert.pkl')
-
-# X_train_glove = np.load('data/vectors/X_train_glove.npy')
-# X_test_glove = np.load('data/vectors/X_test_glove.npy')
-# X_validation_glove = np.load('data/vectors/X_validation_glove.npy')
-# y_train_glove = np.load('data/vectors/y_train_glove.npy')
-# y_test = np.load('data/vectors/y_test_glove.npy')
-# y_validation_glove = np.load('data/vectors/y_validation_glove.npy')
-#
-# X_train_bert = np.load('data/vectors/X_train_bert.npy')
-# X_test_bert = np.load('data/vectors/X_test_bert.npy')
-# X_validation_bert = np.load('data/vectors/X_validation_bert.npy')
-# y_train_bert = np.load('data/vectors/y_train_bert.npy')
-# y_validation_bert = np.load('data/vectors/y_validation_bert.npy')
-#
-# y_test_no_labels_glove = np.load('data/vectors/y_test_no_labels_glove.npy')
-# y_test_no_labels_bert = np.load('data/vectors/y_test_no_labels_bert.npy')
-#
-# # Load dictionarie label_encoders_X_glove and label_encoders_X_bert
-# label_encoders_X_glove = joblib.load('data/vectors/label_encoders_X_glove.pkl')
-# label_encoders_X_bert = joblib.load('data/vectors/label_encoders_X_bert.pkl')
-
-evaluator = FeatureEvaluator(X_train, y_train)
-evaluator.evaluate_importance()
-evaluator.plot_importance()
-
-top_features = evaluator.get_top_features(n=10)
-print("Top 10 features:", top_features)
 
 # %% 5- Model Building
 
@@ -1197,7 +1548,7 @@ results_dict = {
     "Bagging": {"Accuracy": 0.0, "Sensitivity": 0.0, "Specificity": 0.0, "F1_score": 0.0}
 }
 
-# Define the model dictionary for optimization
+# Define the model dictionary for the GloVe embeddings
 models_dict_glove = {
     "LogisticRegression": {
         "model": LogisticRegression,"C_values": (0.01, 0.1, 1.0, 10.0),"penalty": (None, 'l2')},
@@ -1209,19 +1560,19 @@ models_dict_glove = {
         "model": MLPClassifier, "population_size": 5, "max_generations": 20, "layer_range": (50, 200), "activation": ("tanh", "logistic", "relu")}
 }
 
-# Initialize the ModelBuilding class with the training, testing and validation data
+# Initialize the ModelBuilding class with the training, testing and validation data for GloVe and BERT embeddings
 builder_glove = ModelBuilding(np.array(X_train_glove), np.array(y_train_glove), np.array(X_test_glove), np.array(y_test),
                               np.array(X_validation_glove), np.array(y_validation_glove), 'glove')
-
 builder_bert = ModelBuilding(np.array(X_train_bert), np.array(y_train_bert), np.array(X_test_bert), np.array(y_test),
                              np.array(X_validation_bert), np.array(y_validation_bert), 'bert')
 
-# Supervised Learning Algorithms
+# Build, optimize, and evaluate the models for GloVe
 builder_glove.build_models("LogisticRegression", models_dict_glove, results_dict)
 builder_glove.build_models("RandomForest", models_dict_glove, results_dict)
 builder_glove.build_models("SVM", models_dict_glove, results_dict)
 builder_glove.build_models("MLP", models_dict_glove, results_dict)
 
+# Define the model dictionary for the BERT embeddings
 models_dict_bert = {
     "LogisticRegression": {
         "model": LogisticRegression,"C_values": (0.01, 0.1, 1.0, 10.0),"penalty": (None, 'l2')},
@@ -1233,30 +1584,31 @@ models_dict_bert = {
         "model": MLPClassifier, "population_size": 5, "max_generations": 20, "layer_range": (50, 200), "activation": ("tanh", "logistic", "relu")}
 }
 
+# Build, optimize, and evaluate the models for BERT
 builder_bert.build_models("LogisticRegression", models_dict_bert, results_dict)
 builder_bert.build_models("RandomForest", models_dict_bert, results_dict)
 builder_bert.build_models("SVM", models_dict_bert, results_dict)
 builder_bert.build_models("MLP", models_dict_bert, results_dict)
 
-# Serialize the builder object
+# Serialize the builder object for GloVe
 with open('builder_glove.pkl', 'wb') as f:
     pickle.dump(builder_glove, f)
-# Deserialize the builder object
+# Deserialize the builder object for GloVe
 with open('builder_glove.pkl', 'rb') as f:
     builder_glove = pickle.load(f)
 
-# Serialize the builder object
+# Serialize the builder object for Bert
 with open('builder_bert.pkl', 'wb') as f:
     pickle.dump(builder_bert, f)
-# Deserialize the builder object
+# Deserialize the builder object for Bert
 with open('builder_bert.pkl', 'rb') as f:
     builder_bert = pickle.load(f)
 
-# Name of the best model
+# Name of the best model for GloVe and Bert
 best_model_name_glove = None
 best_model_name_bert = None
 
-# Check the best model
+# Check the best model of GloVe
 if builder_glove.best_model_checked == LogisticRegression:
     best_model_name_glove = 'LogisticRegression'
 elif builder_glove.best_model_checked == RandomForestClassifier:
@@ -1266,7 +1618,7 @@ elif builder_glove.best_model_checked == SVC:
 elif builder_glove.best_model_checked == MLPClassifier:
     best_model_name_glove = 'MLP'
 
-# Check the best model
+# Check the best model of Bert
 if builder_bert.best_model_checked == LogisticRegression:
     best_model_name_bert = 'LogisticRegression'
 elif builder_bert.best_model_checked == RandomForestClassifier:
@@ -1282,13 +1634,13 @@ print("Best model Glove parameters:", builder_glove.best_model_params_checked)
 print("\nBest model Bert:", best_model_name_bert)
 print("Best model Bert parameters:", builder_bert.best_model_params_checked)
 
-# Comparação dos dois modelos
+# Compare the best models of GloVe and Bert
 if builder_glove.best_score > builder_bert.best_score:
     builder = builder_glove
     X_train = X_train_glove
     y_train = y_train_glove
     X_test = X_test_glove
-    label_encoder = label_encoders_X_glove
+    test_data_encoded = y_test_no_labels_glove
 
     print("\nGlove embeddings model is better\n")
 else:
@@ -1296,7 +1648,7 @@ else:
     X_train = X_train_bert
     y_train = y_train_bert
     X_test = X_test_bert
-    label_encoder = label_encoders_X_bert
+    test_data_encoded = y_test_no_labels_bert
 
     print("\nBert embeddings model is better\n")
 
@@ -1308,7 +1660,8 @@ bagging.examine_bagging()
 # Evaluate the bagging ensemble on the test set
 bagging.evaluate(results_dict)
 
-# Assuming 'builder' contains the best model, PCA, and scaler
-tester = ModelTester(builder, label_encoder, test_data_preprocessed, 'data/predictions.csv')
-# Predict the target and save to CSV
-tester.predict()
+# %% 6- Model Testing
+
+# Predict the genre for the test data with no labels and save the results
+bagging.predict_and_save(test_no_labels_data, test_data_encoded, 'data/results.csv', 'results.txt', label_encoder_target)
+
